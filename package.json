@@ -1,0 +1,35 @@
+{
+  "name": "next-js-app-slides",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "verify:fixtures": "tsx scripts/make-fixtures.ts",
+    "verify:pptx": "tsx scripts/verify-pptx.ts",
+    "verify:pptx:assert": "tsx scripts/verify-pptx-assert.ts",
+    "verify:pptx:probes": "tsx scripts/verify-pptx-probe2.ts && tsx scripts/verify-pptx-probe3.ts && tsx scripts/verify-pptx-probe4.ts && tsx scripts/verify-pptx-probe5.ts",
+    "verify:pptx:letterbox": "tsx scripts/verify-pptx-letterbox-test.ts",
+    "verify:pptx:thirdparty": "tsx scripts/verify-pptx-thirdparty.ts",
+    "verify:pptx:all": "npm run verify:fixtures && npm run verify:pptx && npm run verify:pptx:assert && npm run verify:pptx:letterbox && npm run verify:pptx:thirdparty && npm run verify:pptx:probes",
+    "verify:pptx:opentest": "tsx scripts/verify-pptx-opentest.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/christoferson/next-js-app-slides.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/christoferson/next-js-app-slides/issues"
+  },
+  "homepage": "https://github.com/christoferson/next-js-app-slides#readme",
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "officeparser": "^7.4.0",
+    "pptxgenjs": "^4.0.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  }
+}
