@@ -5,12 +5,13 @@ how, and what remains `⚠️ VERIFY`.
 
 ---
 
-## §1.1 pptxgenjs spike — **PASSED (with 4 constraints on the design)**
+## §1.1 pptxgenjs spike — **PASSED (with 5 constraints on the design)**
 
-**Date:** 2026-07-25
+**Date:** 2026-07-25 (OOXML gate) · **2026-07-26** (render gate, after LibreOffice install)
 **Pinned version:** `pptxgenjs@4.0.1` (exact; API names have shifted across majors — do not float this)
 **Node:** v22.14.0 · **Platform:** win32 10.0.19045
-**Harness:** `npm run verify:pptx:all` (re-runnable; green)
+**Renderer:** LibreOffice 26.2.5.2 (headless → PDF → pdfjs raster)
+**Harness:** `npm run verify:pptx:all` + `npm run verify:pptx:render` + `npm run verify:fonts` (re-runnable; green)
 
 ### Method
 
@@ -21,6 +22,13 @@ against the percent→inch math (914400 EMU/inch). 48/48 checks pass.
 `scripts/verify-pptx-thirdparty.ts` re-reads the package with an unrelated parser
 (`officeparser`) to catch structurally-broken output our own regexes would accept.
 
+**Render gate** (added 2026-07-26): `scripts/render-pptx.ts` converts the deck with headless
+LibreOffice and rasterizes every page, so the visual checks are repeatable and diffable rather
+than dependent on someone's memory of what they saw. LibreOffice is an **independent
+implementation** of the same spec, so its agreement with our EMU assertions is real corroboration
+— but it is **not PowerPoint** (see ⚠️ VERIFY #1). This gate caught a real bug the OOXML
+assertions had passed (C5), which is precisely why it was worth doing.
+
 ### Capability results
 
 | # | Capability | Result | Evidence |
@@ -29,7 +37,7 @@ against the percent→inch math (914400 EMU/inch). 48/48 checks pass.
 | 2 | Full-bleed background image | ✅ | `off=(0,0)`, `ext=(9144000,5143500)` — pixel-exact to slide extent |
 | 3 | Text box at percent-derived coords | ✅ | **worst delta across all 5 probe zones = 0 EMU** |
 | 4 | `align` / `valign` | ✅ | left/center/right → `algn="l|ctr|r"`; top/middle/bottom → `anchor="t|ctr|b"` |
-| 5 | Bullets, itemized runs, nesting | ✅ | `<a:buChar>`, `<a:buAutoNum>`, `lvl="1"` |
+| 5 | Bullets, itemized runs, nesting | ✅ **but see C5** | `<a:buChar>`, `<a:buAutoNum>`, `lvl="1"` — requires `breakLine` per item |
 | 6 | Server-side buffer output | ✅ | `write({outputType:"nodebuffer"})` → real `Buffer` |
 | 7 | Logo image in a corner | ✅ | second `<p:pic>` at declared offset |
 | 8 | Speaker notes | ✅ | `ppt/notesSlides/notesSlide1.xml` with the text |
@@ -42,7 +50,24 @@ against the percent→inch math (914400 EMU/inch). 48/48 checks pass.
 **Zone model is sound as specified.** Percent→inch→EMU is exact, so `resolveZones()` can be
 shared verbatim between the React preview and `toPptx` (§8) with no fudge factors.
 
-### The 4 constraints the design must absorb
+### Render-gate results (LibreOffice 26.2.5.2 · `out/render/page-*.png`)
+
+Every `CONFIRM:` line in `out/OPEN-TEST.pptx` (21 slides) was checked against the rasterized page.
+
+| §1.1 checklist item | Result | What the render showed |
+|---|---|---|
+| Background truly full-bleed at 16:9, no white margins | ✅ | The fixture's magenta 1%-inset border touches all four page edges; corner markers all present |
+| Text lands where the percent math says | ✅ | Slide 2 draws each zone's outline at the same coordinates as its label — every label sits inside its box, at the stated corner |
+| `align` / `valign` behave as expected | ✅ | left/center/right and top/middle/bottom all correct, incl. the right+bottom sidebar and centered footer |
+| Bullets render | ⚠️ → ✅ | **Initially FAILED** — three items collapsed onto one line with a single bullet. Root-caused to C5; after the `breakLine` fix: three bullets, one nested/indented, one numbered `1.` |
+| Long text doesn't silently overflow | ✅ (confirms C1) | Text spills visibly above *and* below both boxes; `fit:'shrink'` behaved identically to `fit:'none'` — no shrinking, exactly as C1 predicted |
+| CJK renders | ✅ | `日本語も確認` renders correctly, no tofu |
+| Each font's `pptxName` renders (not silently substituted) | ✅ 15/16 | See the Fonts section — only `Aptos` substituted |
+| Letterbox places the image without distortion | ✅ | 4:3 asset pillarboxed with symmetric black bars; grid cells square, not stretched |
+| Token-styled path (solid bg + accent bar, no image) | ✅ | Correct |
+| Logo image in a corner | ✅ | Present at its declared offset |
+
+### The 5 constraints the design must absorb
 
 These are library facts, verified in source and output — not blockers, but the exporter must
 be written around them.
@@ -119,6 +144,41 @@ asset. Acceptable: non-16:9 uploads are the warned edge case, not the norm.
 - Every slide gets a `notesSlide` part even with no `addNotes` call (19 of 20 empty in the
   probe deck) — harmless, just deck-size noise.
 
+#### C5 — A shape-level `align` silently destroys bullet lists unless every item sets `breakLine`
+
+**Found by the render gate, missed by the OOXML assertions** — those checked that `<a:buChar>`,
+`<a:buAutoNum>` and `lvl="1"` were *emitted somewhere*, not that they were attached to
+*separate paragraphs*. The rendered page showed all three items run together on one line.
+
+Cause (`dist/pptxgen.cjs.js` "STEP 5: Group textObj into lines", ~L6186):
+
+```js
+if (arrTexts.length > 0 && (textObj.options.align || opts.align)) {
+    if (textObj.options.align !== arrTextObjects[idx - 1].options.align) { /* new paragraph */ }
+}
+else if (arrTexts.length > 0 && textObj.options.bullet) { /* new paragraph */ }
+```
+
+The bullet branch is an **`else if`**. A shape-level `align` makes the first condition true for
+every run, so the bullet branch never executes — and because per-run `align` is `undefined`
+everywhere, the "align changed" test never fires either. Result: all runs land in **one `<a:p>`**.
+Measured on the pre-fix deck: `1 paragraph, 3 runs, 1 <a:buChar>` — items 2 and 3 lost their
+`indentLevel` and their numbered-bullet type **with no warning**.
+
+This is not an edge case: `SlotZone` carries `align`, so **every** bullets slot rendered through
+the zone model would have hit it.
+
+→ **Fix: set `breakLine: true` on every bullet item's options.** That path (branch C) runs
+unconditionally after the if/else-if, so paragraphs split regardless of align.
+`scripts/verify-bullets3.ts` proves it holds for `align: left | center | right` and for no
+align at all — 3 paragraphs, 3 bullets, nesting and numbering preserved in every case.
+The bisect that isolated it (`verify-bullets2.ts`) also cleared `color`, `margin`, `valign`
+and `fit` of involvement.
+
+→ **The exporter must own this**, not each layout's `toPptx`: build bullet runs through one
+shared helper that always stamps `breakLine`, so a new layout can't reintroduce the bug.
+Add an export-time assertion that a bullets slot with *n* items produced *n* `<a:p>` elements.
+
 ### Fonts
 
 All 16 candidate `pptxName` values are written verbatim into the OOXML —
@@ -135,30 +195,95 @@ dist), so substitution risk cannot be eliminated in-library — only managed by 
 widely-installed faces. Substitution is a **render-time** behaviour, invisible in the XML;
 it can only be cleared by the human open-test below.
 
-| Tier | Entries | Risk |
-|---|---|---|
-| `core` (web-safe, Win + Mac Office) | Arial, Georgia, Verdana, Tahoma, Times New Roman, Trebuchet MS, Courier New | low |
-| `office` (bundled with Office) | Calibri, Cambria, Candara, Constantia, Corbel, Franklin Gothic Book, Garamond | low–medium |
-| `risky` (Windows-only / newer) | Segoe UI, Aptos | **medium — likely substituted on macOS PowerPoint / Google Slides** |
+#### Substitution measured: 15 of 16 honoured
+
+`scripts/verify-font-substitution.ts` (`npm run verify:fonts`) renders one slide per candidate
+at identical geometry plus a deliberately-missing control font (`ZZ_NoSuchFont_ZZ`), converts
+via LibreOffice, then reads the **`/BaseFont` descriptors embedded in the PDF**. That is the
+authoritative signal: the renderer embeds the *resolved, post-substitution* face and names it,
+so "asked for Aptos, got ArialUnicodeMS" is the substitution stated by the renderer itself.
+Bitmap comparison against the control corroborates it.
+
+| Tier | Entries | Requested → embedded | Verdict |
+|---|---|---|---|
+| `core` | Arial, Georgia, Verdana, Tahoma, Times New Roman, Trebuchet MS, Courier New | ArialMT, Georgia, Verdana, Tahoma, TimesNewRomanPSMT, TrebuchetMS, CourierNewPSMT | ✅ all honoured |
+| `office` | Calibri, Cambria, Candara, Constantia, Corbel, Franklin Gothic Book, Garamond | Calibri, Cambria, Candara, Constantia, Corbel, FranklinGothic-Book, Garamond | ✅ all honoured |
+| `risky` | Segoe UI | SegoeUI | ✅ honoured (Windows; expect substitution on macOS) |
+| `risky` | **Aptos** | *not embedded* → **ArialUnicodeMS** | ❌ **SUBSTITUTED** |
+
+`Aptos` is not installed on this machine, so this confirms the prediction from the installed-font
+enumeration and also confirms the detector works (it correctly flags the one font that is absent,
+and its bitmap matches the bogus control's). The only fallback face present in the whole PDF is
+`ArialUnicodeMS`, which no candidate requested.
+
+→ **Recommendation: drop `aptos` from the proposed `FONTS` registry** per §14 ("a FONTS entry
+has no PowerPoint-safe `pptxName` that survives the open-test"). It is a new Office 2024 default,
+so it will be missing on any older Office, LibreOffice, and Google Slides. `segoe_ui` survives
+here but is Windows-only — keep it flagged, or drop it too if cross-platform fidelity matters
+more than having 16 entries.
+
+#### Mitigation while the PowerPoint open-test is deferred (⚠️ VERIFY #1)
+
+Substitution is the only deferred unknown with real product impact — a substituted font is a
+visibly off-brand deck, which contradicts the "on-brand by construction" guarantee. It can be
+mostly retired **by decision rather than by testing**:
+
+→ **Ship the 7 `core` entries; gate `office` + `risky` behind the open-test.** Arial, Georgia,
+Verdana, Tahoma, Times New Roman, Trebuchet MS and Courier New have shipped with both Windows
+and Mac Office for ~two decades and are the least likely to surprise. The `office` tier is
+*probably* fine on any real Office install — but "probably" is exactly what the open-test is for,
+and 7 fonts is not a limiting palette for a first release.
+
+This is a **product call, not a verification finding** — `FONT_CANDIDATES` is left intact and
+unratified (⚠️ VERIFY #2). Record the decision here when made.
+
+Belt-and-braces regardless of tier: because pptxgenjs cannot embed fonts and writes any
+`fontFace` verbatim (C4), a substituted font is **undetectable at export time**. If per-font
+fidelity guarantees are ever needed, the only mechanisms are (a) restricting the registry, or
+(b) rendering text to images — the latter defeats editability and is not recommended.
 
 ### ⚠️ VERIFY — open
 
-1. **⚠️ The human PowerPoint open-test has NOT been performed.** Neither PowerPoint nor
-   LibreOffice is installed on this machine (`POWERPNT.EXE` not found; no `soffice.exe`), so
-   the render-time gate in §1.1 and §13 is **not yet cleared**. Everything above is proven at
-   the OOXML level, which is strictly stronger for geometry but says **nothing** about font
-   substitution or visual overflow.
-   → **`out/OPEN-TEST.pptx`** (21 slides, `npm run verify:pptx:opentest`) exists for exactly
-   this. Each slide carries its own `CONFIRM:` line; the font slides pair each specimen against
-   a red Calibri control, so substitution shows up as "the two lines look identical".
-   Run it on a machine with PowerPoint — ideally also Keynote and Google Slides — and record
-   results here.
-2. **Font tiers unconfirmed at render time.** Any entry that substitutes must be dropped from
-   `FONTS` before it ships (§14). `Aptos` and `Segoe UI` are the expected casualties on macOS.
-3. **`FONT_CANDIDATES` is a proposal**, not a ratified registry — the `webStack` values (browser
+1. **The render gate is cleared on LibreOffice, NOT on PowerPoint.** All §1.1 visual checks now
+   pass against LibreOffice 26.2.5.2 (table above), which is independent-implementation evidence
+   and caught a real bug (C5). But PowerPoint itself is still not installed here, so these remain
+   **PowerPoint-unverified**:
+   - **Font substitution on Office's own font stack** — LibreOffice resolved 15/16 using the
+     system fonts; PowerPoint on **macOS** is the expected divergence (`Segoe UI`, `Aptos`).
+     Google Slides is a third distinct resolver.
+   - **`fit:'shrink'` behaviour on click/edit** — C1's claim that PowerPoint computes `fontScale`
+     only on user interaction is from the library's own typings, not observed. Either way our
+     code must truncate, so this doesn't change the design.
+   - **Speaker-notes pane** — the notes part exists in the OOXML; PDF conversion doesn't show it.
+   → `out/OPEN-TEST.pptx` + `npm run verify:pptx:render` are the reusable harness. Re-run the
+   deck on a machine with real PowerPoint (ideally Keynote + Google Slides too) and append results.
+
+   **DEFERRED, NOT WAIVED — decision 2026-07-26.** No PowerPoint is available, so this item is
+   carried forward rather than blocking §2. Justification: none of the three unverified items can
+   invalidate the zone model or the exporter design — the first changes only *which entries sit in
+   the `FONTS` array*, the second can only behave better than C1 already assumes, and the third is
+   present in the OOXML and read back by officeparser. No §14 stop-and-ask trigger fired. Risk is
+   contained by the font mitigation below, and geometry — the part that *would* force rework — is
+   confirmed by two independent implementations.
+
+   **This blocks the §13 Definition-of-Done checkbox "export opened in real PowerPoint."** That box
+   stays unchecked until this runs. Do it before any release a user's PowerPoint will open; it is
+   not a prerequisite for building layouts, services, or routes.
+
+   Cheap partial closure without an install: upload the deck to **PowerPoint on the web**
+   (Microsoft's own OOXML implementation — strong on layout, only partial on fonts, since web font
+   availability differs from desktop) and to **Google Slides** (a third independent resolver, and
+   the likeliest to expose font problems). Agreement across all three narrows the residual
+   desktop-PowerPoint risk to font substitution alone.
+2. **`FONT_CANDIDATES` is a proposal**, not a ratified registry — the `webStack` values (browser
    preview approximations) have had no visual comparison against their `pptxName` counterparts.
-4. **Char budgets in C1 are arithmetic estimates**, not measured text metrics. Re-derive per
-   font from the open-test, or measure with a font-metrics library if tighter budgets matter.
+   Do that when the browser preview exists (§8).
+3. **Char budgets in C1 are arithmetic estimates**, not measured text metrics. The render
+   confirmed overflow happens but wasn't used to calibrate per-font budgets. Re-derive from the
+   rendered pages or a font-metrics library if tighter budgets matter.
+4. **Substitution results are machine-specific.** `verify:fonts` measures *this* machine's
+   installed fonts; it is a regression harness, not a portable guarantee. Re-run it per target
+   environment.
 
 ### Files
 
@@ -175,11 +300,19 @@ scripts/verify-pptx-probe4.ts           media duplication + master mitigation
 scripts/verify-pptx-probe5.ts           multi-master · base64 master · stretch caveat · mixed deck
 scripts/verify-pptx-letterbox-test.ts   letterbox table test + end-to-end OOXML proof
 scripts/verify-pptx-thirdparty.ts       independent-reader check (officeparser)
-scripts/verify-pptx-opentest.ts         builds out/OPEN-TEST.pptx for the human gate
+scripts/verify-pptx-opentest.ts         builds out/OPEN-TEST.pptx (21 slides, self-describing)
+scripts/render-pptx.ts                  pptx → LibreOffice → PDF → per-page PNG (the render gate)
+scripts/render-pdf-pages.ts             PDF → PNG rasterizer (pdfjs + @napi-rs/canvas)
+scripts/verify-font-substitution.ts     objective substitution detector via PDF /BaseFont
+scripts/verify-bullets.ts               bullet-form comparison (4 candidate shapes)
+scripts/verify-bullets2.ts              bisect that isolated `align` as the cause of C5
+scripts/verify-bullets3.ts              proves `breakLine` fixes C5 under every align value
+scripts/inspect-bullets.ts              dumps a slide's paragraph/bullet structure
 ```
 
-`npm run verify:pptx:all` re-runs the whole gate. `npm run verify:pptx:opentest` rebuilds the
-manual artifact.
+`npm run verify:pptx:all` re-runs the OOXML gate. `npm run verify:pptx:opentest` rebuilds the
+deck; `npm run verify:pptx:render` renders it to PNGs; `npm run verify:fonts` re-measures
+substitution; `npm run verify:bullets` guards C5.
 
 ### Carry into implementation
 
@@ -188,6 +321,12 @@ manual artifact.
 - Exporter: one `defineSlideMaster` per distinct background (C3); slide-level `addImage` +
   `placeBackground` only for non-16:9 assets.
 - Never use `sizing` (C2); never rely on `fit:'shrink'` to save over-long text (C1).
+- **Build bullet runs through one shared helper that always sets `breakLine: true` (C5)**, and
+  assert paragraph count at export time — a per-layout `toPptx` writing its own bullet runs will
+  silently reintroduce the collapse.
+- Drop `aptos` from the FONTS registry; keep `segoe_ui` flagged as Windows-only.
+- Keep the render gate in CI-ish reach: it caught C5 when 48 OOXML assertions did not. Structural
+  assertions verify what we thought to check; the raster verifies what the user sees.
 - Pin `pptxgenjs@4.0.1` exactly.
 
 ---
