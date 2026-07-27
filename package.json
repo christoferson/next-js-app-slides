@@ -4,6 +4,14 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.scripts.json",
+    "test": "vitest run",
+    "_comment_verify": "Next 16 dropped the `eslint` config key, so `next build` does NOT run lint. This chain is what enforces CLAUDE.md §5 boundaries — use it in CI, not `next build` alone.",
+    "verify": "npm run lint && npm run typecheck && npm run test",
     "verify:fixtures": "tsx scripts/make-fixtures.ts",
     "verify:pptx": "tsx scripts/verify-pptx.ts",
     "verify:pptx:assert": "tsx scripts/verify-pptx-assert.ts",
@@ -15,6 +23,10 @@
     "verify:pptx:render": "tsx scripts/render-pptx.ts",
     "verify:fonts": "tsx scripts/verify-font-substitution.ts",
     "verify:bullets": "tsx scripts/verify-bullets3.ts",
+    "verify:autofit": "tsx scripts/verify-autofit.ts",
+    "verify:bedrock": "tsx scripts/verify-bedrock.ts",
+    "verify:bedrock:models": "tsx scripts/verify-bedrock-models.ts",
+    "verify:bedrock:errors": "tsx scripts/verify-bedrock-errors.ts",
     "verify:render:all": "npm run verify:pptx:opentest && npm run verify:pptx:render && npm run verify:fonts && npm run verify:bullets"
   },
   "repository": {
@@ -24,18 +36,30 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
   "bugs": {
     "url": "https://github.com/christoferson/next-js-app-slides/issues"
   },
   "homepage": "https://github.com/christoferson/next-js-app-slides#readme",
   "devDependencies": {
+    "@aws-sdk/client-bedrock": "^3.1095.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1095.0",
     "@napi-rs/canvas": "^1.0.2",
     "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.2.12",
     "officeparser": "^7.4.0",
     "pdfjs-dist": "^6.1.200",
     "pptxgenjs": "4.0.1",
     "tsx": "^4.23.1",
-    "typescript": "^7.0.2"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "next": "^16.2.12",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.4.3"
   }
 }

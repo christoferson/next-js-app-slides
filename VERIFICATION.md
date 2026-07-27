@@ -10,7 +10,8 @@ how, and what remains `⚠️ VERIFY`.
 **Date:** 2026-07-25 (OOXML gate) · **2026-07-26** (render gate, after LibreOffice install)
 **Pinned version:** `pptxgenjs@4.0.1` (exact; API names have shifted across majors — do not float this)
 **Node:** v22.14.0 · **Platform:** win32 10.0.19045
-**Renderer:** LibreOffice 26.2.5.2 (headless → PDF → pdfjs raster)
+**Renderers:** LibreOffice 26.2.5.2 (headless → PDF → pdfjs raster, automated) ·
+PowerPoint on the web / onedrive.live.com (manual, 2026-07-26 — "looks good")
 **Harness:** `npm run verify:pptx:all` + `npm run verify:pptx:render` + `npm run verify:fonts` (re-runnable; green)
 
 ### Method
@@ -25,9 +26,14 @@ against the percent→inch math (914400 EMU/inch). 48/48 checks pass.
 **Render gate** (added 2026-07-26): `scripts/render-pptx.ts` converts the deck with headless
 LibreOffice and rasterizes every page, so the visual checks are repeatable and diffable rather
 than dependent on someone's memory of what they saw. LibreOffice is an **independent
-implementation** of the same spec, so its agreement with our EMU assertions is real corroboration
-— but it is **not PowerPoint** (see ⚠️ VERIFY #1). This gate caught a real bug the OOXML
-assertions had passed (C5), which is precisely why it was worth doing.
+implementation** of the same spec, so its agreement with our EMU assertions is real corroboration.
+This gate caught a real bug the OOXML assertions had passed (C5), which is precisely why it was
+worth doing.
+
+The deck was then opened manually in **PowerPoint on the web** (onedrive.live.com) — Microsoft's
+own OOXML implementation — and reported good. That makes **three independent renderers agreeing**
+on geometry: our EMU assertions → LibreOffice → PowerPoint Online. What the web app cannot settle
+is desktop-Office font substitution (see ⚠️ VERIFY #1).
 
 ### Capability results
 
@@ -53,6 +59,9 @@ shared verbatim between the React preview and `toPptx` (§8) with no fudge facto
 ### Render-gate results (LibreOffice 26.2.5.2 · `out/render/page-*.png`)
 
 Every `CONFIRM:` line in `out/OPEN-TEST.pptx` (21 slides) was checked against the rasterized page.
+**Corroborated 2026-07-26 by PowerPoint on the web** (onedrive.live.com), which opened the same
+deck cleanly — no repair prompt, layout reported good — so every geometry row below now has two
+independent renderers behind it, one of them Microsoft's.
 
 | §1.1 checklist item | Result | What the render showed |
 |---|---|---|
@@ -60,7 +69,7 @@ Every `CONFIRM:` line in `out/OPEN-TEST.pptx` (21 slides) was checked against th
 | Text lands where the percent math says | ✅ | Slide 2 draws each zone's outline at the same coordinates as its label — every label sits inside its box, at the stated corner |
 | `align` / `valign` behave as expected | ✅ | left/center/right and top/middle/bottom all correct, incl. the right+bottom sidebar and centered footer |
 | Bullets render | ⚠️ → ✅ | **Initially FAILED** — three items collapsed onto one line with a single bullet. Root-caused to C5; after the `breakLine` fix: three bullets, one nested/indented, one numbered `1.` |
-| Long text doesn't silently overflow | ✅ (confirms C1) | Text spills visibly above *and* below both boxes; `fit:'shrink'` behaved identically to `fit:'none'` — no shrinking, exactly as C1 predicted |
+| Long text doesn't silently overflow | ✅ (confirms C1) | Neither `fit` value saves over-long text. `fit:'none'` spills far past the box; `fit:'shrink'` **clips** at the boundary in LibreOffice (both unacceptable). User confirmed in PowerPoint Online that clicking into a `fit:'shrink'` box does **not** shrink it — C1 revised accordingly |
 | CJK renders | ✅ | `日本語も確認` renders correctly, no tofu |
 | Each font's `pptxName` renders (not silently substituted) | ✅ 15/16 | See the Fonts section — only `Aptos` substituted |
 | Letterbox places the image without distortion | ✅ | 4:3 asset pillarboxed with symmetric black bars; grid cells square, not stretched |
@@ -70,25 +79,62 @@ Every `CONFIRM:` line in `out/OPEN-TEST.pptx` (21 slides) was checked against th
 ### The 5 constraints the design must absorb
 
 These are library facts, verified in source and output — not blockers, but the exporter must
-be written around them.
+be written around them. C1 and C5 are the two that will bite silently if forgotten.
 
-#### C1 — `fit:'shrink'` is inert at export time (affects truncation budgets)
+#### C1 — `fit:'shrink'` NEVER shrinks; truncation is the only lever we have
 
-`fit:'shrink'` emits `<a:normAutofit/>` **with no `fontScale` attribute**. The library's own
-typings say it plainly (`types/index.d.ts` ~L1810): *"There is no way for this library to
-trigger that behavior."* PowerPoint computes the scale factor only when a user edits or
-resizes the shape — so **on first open, over-long text overflows its box** rather than shrinking.
+**Strengthened 2026-07-26 after user testing in PowerPoint on the web and a dedicated probe
+(`scripts/verify-autofit.ts` / `npm run verify:autofit`).** The original wording said PowerPoint
+would shrink the text "on click/edit". **That is wrong — it does not.** The user clicked into the
+`fit:'shrink'` box and the text stayed overflowing, identical to `fit:'none'`.
 
-`fit:'none'` emits no autofit element at all; text silently spills past the box with no clipping.
+What is actually going on, in three parts:
 
-→ **Truncation must be enforced in our code, not delegated to PowerPoint.** This makes the
-§9 `trimmed` flag load-bearing rather than cosmetic. First-cut budgets from measured box
-widths (avg advance ≈ 0.5em) are in `scripts/verify-pptx-probe2.ts` probe C — e.g. a 60%-wide
-title at 28pt holds ~30 chars/line; a 52%×34% bullets zone at 16pt holds ~46 chars × 7 lines.
-Calibrate `SlotSpec.maxChars` against these, then re-check on the real fonts.
+1. **pptxgenjs deliberately emits a scale-less flag.** `fit:'shrink'` produces a bare
+   `<a:normAutofit/>` — the `fontScale`/`lnSpcReduction` attributes that do the actual shrinking
+   are **commented out in the library source** (`dist/pptxgen.cjs.js` L6067), with the note
+   *"Shrink does not work automatically - PowerPoint calculates the fontScale value dynamically
+   upon resize."* So the element says "shrink-on-overflow is enabled" but carries no amount.
+2. **Renderers do not compute the missing scale on open, and PowerPoint Online does not compute it
+   on click either** (user-verified). Treat "PowerPoint will work it out" as **false**.
+3. **The attributes ARE honoured when actually present.** Injecting `fontScale="62500"` into the
+   ZIP by hand made LibreOffice render the text visibly smaller and **fit inside the box**. So the
+   OOXML mechanism works; pptxgenjs simply never populates it.
+
+| Slide (probe) | Element emitted | LibreOffice result |
+|---|---|---|
+| 1 | `<a:normAutofit/>` (what `fit:'shrink'` gives) | overflows — **no shrink** |
+| 2 | `<a:normAutofit fontScale="62500"/>` (injected) | **fits** — text scaled down |
+| 3 | `+ lnSpcReduction="20000"` (injected) | **fits** — scaled, tighter leading |
+| 4 | none (`fit:'none'`) | overflows, spills far past the box |
+
+**Renderer divergence worth knowing:** with a bare `<a:normAutofit/>`, LibreOffice **clips** the
+overflow at the box boundary (OPEN-TEST slide 3, right box: text is cut off at the green outline),
+whereas `fit:'none'` **spills** visibly past it. PowerPoint Online overlapped in both cases per the
+user's report. So the *presence* of `normAutofit` changes overflow handling from spill to clip in at
+least one renderer — but **neither behaviour is acceptable output**: one loses content silently, the
+other collides with neighbouring zones.
+
+→ **Truncation must be enforced in our code. There is no fallback.** This makes the §9 `trimmed`
+flag load-bearing rather than cosmetic — it is the *only* thing standing between an over-long LLM
+response and a broken slide. First-cut budgets from measured box widths (avg advance ≈ 0.5em) are
+in `scripts/verify-pptx-probe2.ts` probe C — e.g. a 60%-wide title at 28pt holds ~30 chars/line;
+a 52%×34% bullets zone at 16pt holds ~46 chars × 7 lines. Calibrate `SlotSpec.maxChars` against
+these, then re-check on the real fonts.
+
+→ **Optional hardening, available because of finding 3:** the exporter *could* post-process its own
+output to inject a computed `fontScale` as a second line of defence for the case where our
+character budget still underestimates (e.g. an unexpectedly wide font). Not needed if truncation is
+correct, and it means hand-editing the ZIP, so treat it as a contingency — but it is proven to work
+and worth remembering rather than rediscovering.
+
+→ **Set `fit:'none'` explicitly, not `'shrink'`.** `'shrink'` promises behaviour it does not deliver
+and invites exactly the false assumption recorded here. If clipping is ever preferred over spilling,
+that is a deliberate choice to document, not a side effect to inherit.
 
 Also note `shrinkText` (used in the CLAUDE.md §1.1 example snippet) is **deprecated** in 4.0.1
-in favour of `fit`. The example should be updated.
+in favour of `fit` — and emits the same scale-less `<a:normAutofit/>` (L6076), so it is equally
+inert. CLAUDE.md §1.1 has been corrected.
 
 #### C2 — Native `sizing: {type:'contain'|'cover'}` is unusable; use explicit letterbox math
 
@@ -251,9 +297,11 @@ fidelity guarantees are ever needed, the only mechanisms are (a) restricting the
    - **Font substitution on Office's own font stack** — LibreOffice resolved 15/16 using the
      system fonts; PowerPoint on **macOS** is the expected divergence (`Segoe UI`, `Aptos`).
      Google Slides is a third distinct resolver.
-   - **`fit:'shrink'` behaviour on click/edit** — C1's claim that PowerPoint computes `fontScale`
-     only on user interaction is from the library's own typings, not observed. Either way our
-     code must truncate, so this doesn't change the design.
+   - ~~**`fit:'shrink'` behaviour on click/edit**~~ — **RESOLVED 2026-07-26, no longer open.** The
+     user tested it in PowerPoint on the web: clicking into the box does **nothing**, text still
+     overlaps. The "shrinks on click" claim was wrong; C1 is revised and strengthened. Desktop
+     PowerPoint could in principle differ, but since our code must truncate either way, this no
+     longer affects the design.
    - **Speaker-notes pane** — the notes part exists in the OOXML; PDF conversion doesn't show it.
    → `out/OPEN-TEST.pptx` + `npm run verify:pptx:render` are the reusable harness. Re-run the
    deck on a machine with real PowerPoint (ideally Keynote + Google Slides too) and append results.
@@ -270,11 +318,29 @@ fidelity guarantees are ever needed, the only mechanisms are (a) restricting the
    stays unchecked until this runs. Do it before any release a user's PowerPoint will open; it is
    not a prerequisite for building layouts, services, or routes.
 
-   Cheap partial closure without an install: upload the deck to **PowerPoint on the web**
-   (Microsoft's own OOXML implementation — strong on layout, only partial on fonts, since web font
-   availability differs from desktop) and to **Google Slides** (a third independent resolver, and
-   the likeliest to expose font problems). Agreement across all three narrows the residual
-   desktop-PowerPoint risk to font substitution alone.
+   **PARTIAL CLOSURE — 2026-07-26: PowerPoint on the web (onedrive.live.com) opened the deck and
+   the user reports it "looks good."** This is Microsoft's own OOXML implementation, so it is the
+   strongest evidence available without a desktop install, and it is the **third** independent
+   renderer to agree (our EMU assertions → LibreOffice → PowerPoint Online). What it clears and
+   what it does not:
+
+   | §1.1 item | Cleared by PowerPoint Online? |
+   |---|---|
+   | Full-bleed background, zone positions, `align`/`valign`, bullets/nesting, CJK, letterbox, token-styled path | ✅ **Yes** — same renderer family as desktop for layout; Microsoft's own reader accepted the package without repair prompts |
+   | Package validity / no corruption | ✅ **Yes** — a malformed part would trigger PowerPoint's repair dialog |
+   | Font availability on the **Office** font set | ⚠️ **Partly** — the web app serves fonts from Microsoft's cloud service, so it has the full Office set (incl. `Aptos`). It therefore shows the *best case*, not what a user with an older/minimal Office install sees. `Aptos` rendering here does **not** overturn the LibreOffice substitution finding. |
+   | Font substitution on **macOS desktop** PowerPoint | ❌ **No** — still the main open risk (`Segoe UI`, `Aptos`) |
+   | `fit:'shrink'` on click/edit | ✅ **Yes — answered, negatively.** Clicking in does nothing; text still overlaps. See revised C1 |
+   | Speaker-notes pane | ❌ **Not reported** — worth a glance in the web app's notes pane |
+
+   → Residual risk is now **font substitution on a desktop Office install (especially macOS)**,
+   plus the two cosmetic items above. Geometry is confirmed by three independent implementations
+   and can be considered closed. Keep the §13 checkbox unchecked for the desktop open-test, but
+   the deferral is now materially lower-risk than when it was recorded.
+
+   Remaining cheap step: **Google Slides** — a genuinely different resolver with a different font
+   set, and the likeliest of any to expose substitution.
+
 2. **`FONT_CANDIDATES` is a proposal**, not a ratified registry — the `webStack` values (browser
    preview approximations) have had no visual comparison against their `pptxName` counterparts.
    Do that when the browser preview exists (§8).
@@ -304,6 +370,7 @@ scripts/verify-pptx-opentest.ts         builds out/OPEN-TEST.pptx (21 slides, se
 scripts/render-pptx.ts                  pptx → LibreOffice → PDF → per-page PNG (the render gate)
 scripts/render-pdf-pages.ts             PDF → PNG rasterizer (pdfjs + @napi-rs/canvas)
 scripts/verify-font-substitution.ts     objective substitution detector via PDF /BaseFont
+scripts/verify-autofit.ts               proves fit:'shrink' never shrinks, but fontScale IS honoured (C1)
 scripts/verify-bullets.ts               bullet-form comparison (4 candidate shapes)
 scripts/verify-bullets2.ts              bisect that isolated `align` as the cause of C5
 scripts/verify-bullets3.ts              proves `breakLine` fixes C5 under every align value
@@ -320,7 +387,8 @@ substitution; `npm run verify:bullets` guards C5.
   `lib/layouts/` (or `lib/export/`) rather than reimplementing.
 - Exporter: one `defineSlideMaster` per distinct background (C3); slide-level `addImage` +
   `placeBackground` only for non-16:9 assets.
-- Never use `sizing` (C2); never rely on `fit:'shrink'` to save over-long text (C1).
+- Never use `sizing` (C2). **Never rely on `fit:'shrink'` — it never shrinks (C1, user-verified).**
+  Set `fit:'none'` explicitly and truncate in our own code; the `trimmed` flag is the only guard.
 - **Build bullet runs through one shared helper that always sets `breakLine: true` (C5)**, and
   assert paragraph count at export time — a per-layout `toPptx` writing its own bullet runs will
   silently reintroduce the collapse.
@@ -331,7 +399,229 @@ substitution; `npm run verify:bullets` guards C5.
 
 ---
 
-## §1.2 Bedrock spike — NOT RUN
-## §1.3 Environment sanity — NOT RUN
+## §1.2 Bedrock spike — **PASSED**
 
-Neither was in scope for this pass.
+**Date:** 2026-07-26 · **Account:** 916902469227 (`b2b-sandbox-admin`) · **Region:** `us-east-1`
+**Harness:** `npm run verify:bedrock` (+ `verify:bedrock:models`, `verify:bedrock:errors`)
+**SDK:** `@aws-sdk/client-bedrock-runtime` ^3.1095.0
+
+### 1. Model ID — VERIFIED INVOCABLE
+
+```
+DEFAULT_LLM_MODEL_ID=us.anthropic.claude-opus-5
+```
+
+Chosen by the user (Opus 5). Confirmed present and `ACTIVE`, and confirmed **actually invoked**
+(not merely listed) — round-trip 1849 ms for a 4-token reply.
+
+**⚠️ Critical finding: every Anthropic model in this account is `INFERENCE_PROFILE`-only.** None
+support `ON_DEMAND`. The bare model id therefore **fails**:
+
+```
+anthropic.claude-opus-5      → ValidationException 400
+  "Invocation of model ID anthropic.claude-opus-5 with on-demand throughput isn't supported.
+   Retry your request with the ID or ARN of an inference profile that contains this model."
+us.anthropic.claude-opus-5   → works
+```
+
+→ The model registry must store the **prefixed inference-profile id** (`us.` or `global.`), and
+`⚠️ VERIFY` any new entry the same way. This is exactly the class of thing Prime Directive #1
+exists to catch — the bare id looks more "correct" and is what one would write from memory.
+
+Also available if the default needs changing (all `us.`/`global.` prefixed, all streaming):
+`claude-opus-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6-v1`,
+`claude-sonnet-5`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001-v1:0`, `claude-fable-5`.
+Note the AWS CLI bundled here is **v1 and has no `bedrock` command** — enumerate with the SDK
+(`scripts/verify-bedrock-models.ts`), not the CLI.
+
+### 2. Request schema — VERIFIED (not assumed)
+
+```jsonc
+{
+  "anthropic_version": "bedrock-2023-05-31",   // required; "Invalid API version" if wrong
+  "max_tokens": 512,                           // REQUIRED — omitting → "max_tokens: Field required"
+  "system": "…",                               // optional
+  "temperature": 1,                            // optional
+  "messages": [{ "role": "user", "content": [{ "type": "text", "text": "…" }] }]
+}
+```
+
+Sent with `contentType: "application/json"`, `accept: "application/json"`.
+
+**Non-streaming response:** keys `model, id, type, role, content, stop_reason, stop_sequence,
+stop_details, usage`. **Text is at `content[0].text`.** `stop_reason: "end_turn"`.
+`usage` carries `input_tokens` / `output_tokens` plus cache and `output_tokens_details.thinking_tokens`
+— usable for cost telemetry later.
+
+### 3. Streaming decode path — VERIFIED
+
+`InvokeModelWithResponseStreamCommand`; iterate `res.body`, each item has `chunk.bytes` (Uint8Array)
+to `TextDecoder` + `JSON.parse`. Observed event sequence:
+
+```
+message_start ×1 → content_block_start ×1 → content_block_delta ×N
+  → content_block_stop ×1 → message_delta ×1 → message_stop ×1
+```
+
+```jsonc
+{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"1"}}
+```
+
+→ **Decode path: `chunk.delta.text` where `chunk.type === "content_block_delta"`.** Reassembly
+verified exact. All other event types must be **skipped, not errored on** — matching §12's
+"unknown event types logged + skipped" discipline on our own SSE layer.
+
+### 4. Structured-output compliance — 90% clean, single repair pass is SUFFICIENT
+
+10 runs at `temperature: 1`, asking for `{title ≤60 chars, bullets: exactly 3 strings ≤80 chars}`:
+
+| Outcome | Count | Pipeline path |
+|---|---|---|
+| Clean `JSON.parse` **and** schema-valid | **9/10** | straight through |
+| Needed fence/preamble extraction | 0/10 | tolerant extractor |
+| Parsed but schema-invalid | **1/10** | → repair pass |
+| Unrecoverable garbage | 0/10 | → fallback |
+
+The single failure was `bullets[2] 83>80 chars` — **a budget overrun, not malformed JSON.** That is
+a notable calibration result: the realistic failure mode is *length*, not syntax. It lands on the
+§9 row "valid JSON, one field over budget → truncate at word boundary + `trimmed` flag" — i.e.
+handled by deterministic truncation, **without** spending an LLM round-trip on repair.
+
+→ **§7's single repair pass is sufficient** (90% clean, 100% parseable). No §14 escalation needed.
+→ Zero markdown-fence contamination in 10 runs, but keep the tolerant extractor: it costs nothing
+and the §9 matrix requires it.
+→ Truncation-before-repair is the right ordering, and it reinforces C1: length control is our job.
+
+### 5. Error shapes — VERIFIED (for `lib/adapters` mapping)
+
+| Trigger | `name` | HTTP | `$fault` | Message |
+|---|---|---|---|---|
+| Bogus model id | `ValidationException` | 400 | client | "The provided model identifier is invalid." |
+| Bare id, no `us.` prefix | `ValidationException` | 400 | client | "…on-demand throughput isn't supported. Retry with…an inference profile…" |
+| Missing `max_tokens` | `ValidationException` | 400 | client | "max_tokens: Field required" |
+| Bad `anthropic_version` | `ValidationException` | 400 | client | "Invalid API version: not-a-version" |
+| Invalid credentials | `UnrecognizedClientException` | **403** | client | "The security token included in the request is invalid." |
+| Retired model version | `ResourceNotFoundException` | **404** | client | "This model version has reached the end of its life." |
+| Profile id in wrong region | `ValidationException` | 400 | client | "The provided model identifier is invalid." |
+
+→ Note `ValidationException` is **overloaded** — it covers bad ids, bad regions, and bad request
+bodies alike. The adapter cannot distinguish them by `name` alone; map on `name` + inspect the
+message for the "on-demand throughput" and "Field required" signatures, and never surface a raw
+AWS message to the user.
+
+⚠️ **Not reproduced:** `AccessDeniedException` (these are admin credentials, so no model is
+access-denied) and `ThrottlingException` (cannot be triggered without abusing the account). Map
+from documented shapes: `AccessDeniedException`/403 and `ThrottlingException`/429 with
+`$retryable={throttling:true}`. The SDK retries throttles internally (default `maxAttempts: 3`);
+the adapter must surface the **final** failure as a readable per-slide error so §9's "other slides
+continue, `deck-done {ok, failed}` accurate" holds. **Flagged, not silently assumed.**
+
+### Carry into implementation
+
+- `DEFAULT_LLM_MODEL_ID=us.anthropic.claude-opus-5`; registry entries store **prefixed profile ids**.
+- Request builder: `anthropic_version` + `max_tokens` are mandatory; content as `[{type:"text"}]` blocks.
+- Stream strategy: `chunk.delta.text` on `content_block_delta`; skip all other event types.
+- Repair budget: one pass is enough. Truncate over-budget fields deterministically **before**
+  spending a repair call.
+- All AWS error mapping lives in `lib/adapters/bedrock-llm-adapter.ts` (§5 boundary), keyed on
+  `name` + message signature; `ValidationException` needs sub-classification.
+
+---
+
+## §1.3 Environment sanity — PARTIAL (one item blocked by the toolchain, not by the code)
+
+- ✅ **Bedrock reachable** with the ambient `AWS_PROFILE`/`AWS_REGION` (§1.2 above).
+- ✅ **App builds with NO AWS credentials** — `AWS_PROFILE= AWS_REGION= npx next build` → exit 0
+  (2026-07-27). Enforced going forward by two mechanisms, not by memory:
+  - `loadConfig()` deliberately does **not** validate `DEFAULT_LLM_MODEL_ID`, so a missing model id
+    fails at generation time, not at startup (`tests/container.test.ts` asserts this).
+  - `getContainer()` is lazy, so importing the container has no side effects — nothing is
+    constructed and no `DATA_DIR` write happens until a request needs it.
+  The `/api/registry/*` routes themselves land in §2 step 15; the property they depend on is proven.
+- ✅ **No server SDK in the client bundle (§0.5, §12)** — grepped the built `.next/static` tree
+  (9 JS files) for `@aws-sdk`, `pptxgenjs`, `AWS_PROFILE`, `BedrockRuntime` → **0 hits each**.
+  Also enforced at source level by `tests/architecture.test.ts` and by ESLint (§5).
+- ⚠️ **Docker `output: 'standalone'` build + run smoke — CANNOT RUN, NOT WAIVED.** Docker is not
+  installed on this machine (`docker --version` → command not found, 2026-07-27). What IS verified:
+  `next build` emits `.next/standalone/server.js`, and the `Dockerfile` + `.dockerignore` are
+  written against that output. What is NOT verified: that the image builds and serves. This is the
+  same "deferred, not waived" treatment as the PowerPoint desktop open-test — re-run
+  `docker build -t deck-studio . && docker run -p 3000:3000 -v $(pwd)/data:/data deck-studio`
+  once Docker is available, before any deployment claim.
+- N/A **`sharp`** — not needed: `scripts/letterbox.ts` reads PNG/JPEG intrinsic dimensions from
+  file headers with no image library, so there is no native-module dependency to sanity-check.
+
+---
+
+## §2 steps 1–6 — foundation layers **COMPLETE** (2026-07-27)
+
+`npm run verify` (lint → typecheck → 95 tests) green. Build order followed bottom-up; each layer
+was tested before the next existed.
+
+### §5 boundary lint — ENFORCED AND PROVEN TO FIRE
+
+CLAUDE.md §5 says a boundary violation must be a *failing build*, so the rules were proven with
+deliberate violations rather than assumed:
+
+| Probe (since deleted) | Violation | Reported? |
+|---|---|---|
+| `app/api/_boundary-probe/route.ts` | imports `lib/repositories/**` | ✅ error |
+| same file | imports `node:fs` | ✅ error |
+| `lib/services/probe-service.ts` | imports `lib/repositories/**` | ✅ error |
+
+**Two toolchain traps found and fixed** (both would have left the rules silently inert):
+
+1. **Next 16 removed the `eslint` config key** — `next build` no longer runs ESLint *at all*. A
+   boundary violation would therefore ship with a green build. Mitigation: `npm run verify`
+   chains lint + typecheck + test; **CI must run that, not `next build`**.
+2. **`FlatCompat` cannot load `eslint-config-next` v16** — it throws
+   `TypeError: Converting circular structure to JSON` from `@eslint/eslintrc`'s config-validator
+   (it `JSON.stringify`s a self-referencing plugin object). v16 ships a *native* flat-config array,
+   so it is now imported directly and `@eslint/eslintrc` was removed as a dependency.
+
+Also: TypeScript was downgraded 7.0.2 → 6.0.3 because `typescript-eslint` does not support TS 7.0
+— §5 lint is non-negotiable, so the lint-capable compiler wins.
+
+### §6 swap-readiness — PROVEN
+
+- **One** shared contract suite (`tests/repository-contract.ts`, 37 cases) imported by both
+  `tests/memory-repositories.test.ts` and `tests/file-repositories.test.ts`. Never copied.
+- **Both backends green on the identical suite.** Covered: CRUD, user scoping (A cannot read/​write
+  B's entities), per-slide put/get/delete/reorder, list summaries, delete cascade, patch-vs-replace
+  meta semantics, defensive copying, and concurrent `putSlide`/`updateMeta`.
+- **Backend selection is one config value** — `tests/container.test.ts` builds a container with
+  `storageBackend: "memory"` and asserts the wiring, with zero service/route changes. Adding
+  DynamoDB is one `case` per switch in `lib/repositories/factory.ts`; the `default` arms are typed
+  `never`, so **extending the config union fails to typecheck until the case is wired**.
+- **Interface hygiene** is machine-checked, not reviewed (`tests/architecture.test.ts`): no port
+  imports `fs`/`@aws-sdk`/an impl, no port method name contains `Sync(`, concrete impls are
+  constructed **only** in `lib/repositories/factory.ts`.
+
+Findings worth carrying:
+
+- **Atomic writes are not enough.** `writeFileAtomic` (temp + fsync + rename) guarantees a reader
+  never sees a *corrupt* file; it does nothing about a *lost update*. `updateMeta` is
+  read-modify-write, so two concurrent patches drop one without a lock. Hence `KeyedMutex` — and
+  the contract suite tests the lost-update case directly (three concurrent patches, all three
+  fields must survive).
+- **The lock is in-process only.** Correct for v1 (single Next server) and for file-on-EFS with one
+  task. Multiple writer tasks would need a different mechanism. Documented in `fs-util.ts` rather
+  than left as an assumption.
+- **Path safety belongs in the path builder**, not in callers. `safeSegment` is an allowlist
+  (`[A-Za-z0-9_-]` + one optional short extension), so `..`, `.`, `a/b`, `a\b`, `C:\…`, NUL and
+  empty are all rejected by one rule — and the thrown message does **not** echo the crafted value.
+- **`reorderSlides` validates the whole permutation before writing.** A partial apply would leave
+  duplicate `order` values that `listSlides` cannot resolve deterministically. Both impls also
+  tie-break on id, so even a crash mid-reorder yields a stable order.
+- **Ordering needs no stored index** — ULIDs sort lexicographically by mint time, so "newest first"
+  is a plain key sort. The generator is monotonic within a millisecond for that reason.
+
+### Deliberate deviations from SPEC §4.3, and why
+
+| SPEC | Built | Reason |
+|---|---|---|
+| `AssetStore.put(… data: Buffer …)` | `data: Uint8Array` | Keeps a Node-only type out of the port. `Buffer` **is** a `Uint8Array`, so existing callers stay valid. |
+| `AssetStore` = 4 methods | + `getMeta`, `resolve` | The export path needs metadata for every slide but bytes only for the *distinct* backgrounds (§1.1/C3). Without these, callers would stream a 5 MB image just to read its dimensions. |
+| — | `ReadableAsset.body` is a **web** `ReadableStream` | What a Next route returns directly and what the S3 SDK already yields; `Readable.toWeb` is confined to the disk adapter. |
+| — | `InvalidSlideOrder` error code added | A bad reorder request is a 400, not a 404 `SlideNotFound`. Reusing the latter would have made the taxonomy lie. |
+| `STORAGE_BACKEND=file\|dynamodb` | `file\|memory` | §6.3 requires the suite pass against a second backend "registered via one factory case". Making `memory` a real, documented config value is the honest way to prove that; `dynamodb` remains an unwritten case. |

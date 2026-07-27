@@ -1,0 +1,13 @@
+# Keep the build context small and — more importantly — keep local state out of the image.
+# `data/` holds real brand/deck files; copying it in would bake one developer's data into the
+# image and shadow the /data volume mount.
+node_modules
+.next
+out
+fixtures
+data
+.git
+.env
+.env.*
+npm-debug.log*
+*.tsbuildinfo

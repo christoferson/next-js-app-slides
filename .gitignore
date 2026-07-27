@@ -38,3 +38,6 @@ next-env.d.ts
 # spike outputs
 /out/
 /fixtures/
+
+# local persistence (the DATA_DIR default) — user brand/deck data, never committed
+/data/

@@ -1,0 +1,20 @@
+{
+  // The §1 spike scripts are Node/CJS (tsx), not part of the Next build — `require.main`,
+  // nodebuffer output and top-level fs access all belong here and nowhere else.
+  // Kept typechecked, just under different module settings than the app.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    // `node16` rather than the classic `node`/node10 algorithm: TS 6.0 deprecates node10 (it
+    // ignores package `exports` maps, which several of our deps now rely on) and TS 7 removes it.
+    "module": "node16",
+    "moduleResolution": "node16",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "types": ["node"]
+  },
+  "include": ["scripts/**/*.ts"]
+}

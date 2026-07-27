@@ -44,11 +44,11 @@ slide.addText("Zone-positioned title — 日本語も確認", {
 // 3. Bullets with itemized runs; 4. shrink-to-fit behavior; 5. logo image in a corner
 // ✅ VERIFIED 4.0.1 — `breakLine` is MANDATORY on every item: a shape-level `align` otherwise
 // collapses all runs into ONE paragraph, silently dropping every item's bullet but the first
-// (VERIFICATION.md C5). `shrinkText` is deprecated in 4.0.1 → use `fit`, but note it is inert
-// at export (C1): truncate in our own code.
+// (VERIFICATION.md C5). Note `fit:'shrink'` (and deprecated `shrinkText`) NEVER shrinks — not on
+// open, not on click — so use `fit:'none'` and truncate in our own code (C1).
 slide.addText([{ text: "Point one", options: { bullet: true, breakLine: true } },
                { text: "Point two", options: { bullet: true, breakLine: true } }],
-  { x: 0.8, y: 2.2, w: 8.4, h: 2.5, fontSize: 18, fit: "shrink" });
+  { x: 0.8, y: 2.2, w: 8.4, h: 2.5, fontSize: 18, fit: "none" });
 
 // 6. Server-side buffer output (no fs write required by the route)
 const buf = await pptx.write({ outputType: "nodebuffer" });   // ✅ VERIFIED on 4.0.1
@@ -65,11 +65,13 @@ console.log("pptx buffer OK", (buf as Buffer).length);
 ❌ If any capability is missing → **stop and flag**; the zone model may need adjusting before layouts are built.
 
 > **STATUS: §1.1 PASSED** (2026-07-26) — see `VERIFICATION.md` for the 5 constraints (C1–C5) the
-> exporter must be written around. Zone math is EMU-exact (0 delta). The render gate ran on
-> LibreOffice, **not PowerPoint** — the "open in real PowerPoint" checkbox above and in §13 is
-> **deferred, not waived**; `npm run verify:render:all` is the harness for when PowerPoint is
-> available. Two notes for anyone building layouts: bullet runs must go through one shared helper
-> that always sets `breakLine` (C5), and truncation is our job, not PowerPoint's (C1).
+> exporter must be written around. Zone math is EMU-exact (0 delta), confirmed by **three
+> independent renderers** (our EMU assertions, LibreOffice 26.2.5.2, and PowerPoint on the web).
+> Desktop PowerPoint is unavailable here, so the §13 "opened in real PowerPoint" box is
+> **deferred, not waived** — the only material gap left is font substitution on a desktop Office
+> install (esp. macOS). `npm run verify:render:all` is the automated harness. Two notes for anyone
+> building layouts: bullet runs must go through one shared helper that always sets `breakLine`
+> (C5), and **truncation is our job — `fit:'shrink'` never shrinks, verified on click (C1)**.
 
 ### 1.2 Bedrock spike (gates generation)
 
