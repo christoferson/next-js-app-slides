@@ -541,13 +541,18 @@ continue, `deck-done {ok, failed}` accurate" holds. **Flagged, not silently assu
 - ✅ **No server SDK in the client bundle (§0.5, §12)** — grepped the built `.next/static` tree
   (9 JS files) for `@aws-sdk`, `pptxgenjs`, `AWS_PROFILE`, `BedrockRuntime` → **0 hits each**.
   Also enforced at source level by `tests/architecture.test.ts` and by ESLint (§5).
-- ⚠️ **Docker `output: 'standalone'` build + run smoke — CANNOT RUN, NOT WAIVED.** Docker is not
-  installed on this machine (`docker --version` → command not found, 2026-07-27). What IS verified:
-  `next build` emits `.next/standalone/server.js`, and the `Dockerfile` + `.dockerignore` are
-  written against that output. What is NOT verified: that the image builds and serves. This is the
-  same "deferred, not waived" treatment as the PowerPoint desktop open-test — re-run
+- ✅ **`npm run dev` serves the app with NO AWS credentials** — `AWS_PROFILE= AWS_REGION= next dev`
+  → ready in 1.8s, `GET /` → 200 (2026-07-28). Confirms the lazy-container property above holds at
+  runtime, not just at build time.
+- ⚠️ **Docker `output: 'standalone'` build + run smoke — SKIPPED BY DECISION (2026-07-28), FLAGGED.**
+  Docker is not installed on this machine (`docker --version` → command not found) and the user
+  elected to skip rather than install it. What IS verified: `next build` emits
+  `.next/standalone/server.js`, and the `Dockerfile` + `.dockerignore` are written against that
+  output. What is **NOT** verified: that the image builds, that the non-root `nextjs` user can write
+  `/data`, or that the volume mount round-trips. **This blocks the SPEC §13 acceptance line
+  "`docker build`/`run -v …:/data` yields the identical app"** — that box stays unchecked. Before any
+  deployment claim, run:
   `docker build -t deck-studio . && docker run -p 3000:3000 -v $(pwd)/data:/data deck-studio`
-  once Docker is available, before any deployment claim.
 - N/A **`sharp`** — not needed: `scripts/letterbox.ts` reads PNG/JPEG intrinsic dimensions from
   file headers with no image library, so there is no native-module dependency to sanity-check.
 
@@ -625,3 +630,97 @@ Findings worth carrying:
 | — | `ReadableAsset.body` is a **web** `ReadableStream` | What a Next route returns directly and what the S3 SDK already yields; `Readable.toWeb` is confined to the disk adapter. |
 | — | `InvalidSlideOrder` error code added | A bad reorder request is a 400, not a 404 `SlideNotFound`. Reusing the latter would have made the taxonomy lie. |
 | `STORAGE_BACKEND=file\|dynamodb` | `file\|memory` | §6.3 requires the suite pass against a second backend "registered via one factory case". Making `memory` a real, documented config value is the honest way to prove that; `dynamodb` remains an unwritten case. |
+
+---
+
+## §2 step 7 — `lib/brand/*` COMPLETE (2026-07-28)
+
+CLAUDE.md §2 step 7 in full: *"`brand-schema.ts` (zod incl. zone bounds + slotKey cross-check),
+`theme.ts` (pure `compileTheme`), `contrast.ts` (AA check + deterministic repair — table-test known
+failing pairs), `fonts.ts`/`tones.ts` registries."* All five files exist; **178 tests green** across
+7 files (`npm run verify`: lint → 2× typecheck → vitest).
+
+| File | Tests | What is actually proven |
+|---|---|---|
+| `contrast.ts` | 28 (`tests/contrast.test.ts`) | WCAG luminance/ratio against **independent reference values** (white=1, `#808080`≈0.2159, `#767676` on white ≈4.54) — a bug cannot make these pass by agreeing with itself. Then the demanded 12-row failing-pairs table. |
+| `theme.ts` | 18 (`tests/theme.test.ts`) | Purity (deterministic, non-mutating, id-independent), pptxgenjs hex form on every emitted colour, AA on all four painted surfaces, one notice per repair, monotonic tint/shade ramps. |
+| `brand-schema.ts` | 37 (`tests/brand-schema.test.ts`) | SPEC §5's four named import checks, one describe block each: hex colours, zones 0–100 non-degenerate, slotKeys exist on the layout, assets resolve. |
+| `fonts.ts` | (registry; measured in §1.1) | Ratified 2026-07-28: 7 `core` selectable, 7 `office` + `segoe_ui` gated, `aptos` dropped. |
+| `tones.ts` | (registry; asserted by §7 later) | 5 tones with prompt-safe `promptFragment`s. |
+
+### Contrast repair — the design decisions, and why they are testable
+
+- **A fixed 20-step ladder, not a binary search.** Determinism is load-bearing: the browser preview
+  and the PPTX exporter each call `compileTheme` independently (§8), so a search that wandered by a
+  fraction would make the export stop matching the preview the user approved. `is deterministic` and
+  `is idempotent` assert this directly.
+- **Stop at the FIRST passing step.** Repair should reach AA and stop, not drive to black. The test
+  asserts magenta stays magenta-ish (`r > b > g`, and not `000000`) after repair.
+- **`mixToward` is linear in sRGB** — not perceptually uniform, but monotonic in luminance, which is
+  all the ladder needs, and unlike an HSL round-trip it *cannot* drift the hue.
+- **A documented unreachable case:** `#808080` text on a `#808080` background cannot reach 4.5:1
+  against either pole. The implementation takes the better pole (~3.9:1) rather than throwing; the
+  test asserts `> 3` for that one row and full AA for every other. Recorded as behaviour, not a bug.
+- **Malformed hex passes through untouched, unrepaired.** A bad colour must surface as a *schema*
+  error; silently rewriting it here would hide the real fault.
+
+### `compileTheme` — two guarantees that hold by construction
+
+1. **Renderers never see a `BrandDefinition`.** `DesignTokens` is the only appearance input, so a
+   renderer *cannot* reach past the theme for a raw brand colour and thereby bypass contrast repair.
+   It is not a rule anyone has to remember.
+2. **Large vs normal threshold is applied per surface, not globally.** `onPrimary`/`onAccent` back
+   title and callout text (32–40pt = WCAG large ⇒ 3:1); `onBackground`/`onSurface` back body text
+   (⇒ 4.5:1). Holding titles to 4.5:1 would repair colours that are *already compliant* and move
+   them off-brand for no accessibility gain. Both thresholds are asserted.
+
+### `brand-schema.ts` — the one shape decision worth flagging
+
+**The `slotKey` cross-check is an INJECTED lookup, not an import of the layout registry.** Three
+reasons, in order of weight:
+
+1. **It would be a cycle.** Layout definitions consume `DesignTokens` from `lib/brand`, so
+   `brand → layouts → brand` would be circular.
+2. **Layouts carry a `FallbackRenderer` (a React component)** — importing the registry would drag
+   React into `lib/brand`, which services and the schema must stay free of.
+3. **It is testable now**, before the registry exists (§2 step 8), via a stub `LayoutLookup`.
+
+The shape: `validateBrand(input, { layouts?, knownAssetIds? })`. Structural validation is pure zod
+and needs neither — so the brand editor can validate on every keystroke — while the cross-checks run
+on save, where the registry and an asset listing are available. Omitting an option **skips** that
+check rather than failing it (asserted both ways). No SPEC shape changed; §2 step 8 wires the real
+registry in as a one-object adapter.
+
+Also decided while writing it:
+
+- **Colours are NORMALIZED on parse** to canonical `RRGGBB` (uppercase, no `#`). That is the only
+  form pptxgenjs accepts (§1.1) and the form `DesignTokens` emits, so `#fff`, `#FFF`, and `FFFFFF`
+  cannot become three "different" brands. Export → re-import is identical (§11 step 3, asserted).
+- **`tone.voice` is a closed TONES id, not free text.** It is the one brand field that reaches a
+  prompt (§7), so keeping it closed means the text we send is authored by *us* and provably free of
+  visual vocabulary. Bespoke voice goes through `traits`, which are bounded (12 × 40 chars) so a
+  prompt cannot be stuffed through them.
+- **Gated fonts still VALIDATE.** Gating is a picker policy (`selectableFonts()`), not a validity
+  rule — otherwise a brand created before an entry was gated could not even be opened to change the
+  font. Asserted for `cambria` and `segoe_ui`; `aptos` (dropped) correctly fails.
+- **`z.strictObject` everywhere.** A typo'd key in a hand-edited JSON import is reported, not
+  silently dropped — exactly the failure mode SPEC §5's "raw JSON import" invites.
+- **A template omitting a required slot's zone is an ERROR.** Zone resolution is
+  `templates[layoutId].zones` **else** `defaultZones` — a template *replaces* defaults wholesale, so
+  an omitted required slot means that content has nowhere to go and is silently invisible.
+- **Crafted ids are rejected at the schema edge too** (`^[A-Za-z0-9_-]{1,128}$` for `id`, `userId`,
+  asset ids). The real defence is still `fs-util.safeSegment` where the filesystem is touched; this
+  is depth, so the user gets a readable field error instead of a deep adapter throw.
+- **Nothing is partially applied.** On any issue the caller gets `{ok: false, issues}` with **no**
+  `value` property at all (asserted), and every issue carries a dotted `path` the editor can
+  highlight (§12).
+
+### Carry-forward for §2 step 8 (layouts)
+
+- Provide a `LayoutLookup` adapter over the registry: `{ layout: (id) => ({ slotKeys,
+  requiredSlotKeys }) }`. One object, wired where the brand service is constructed.
+- `DEFAULT_BRAND_COLORS` (AA-clean, neutral) is exported from `brand-schema.ts` — the seed for
+  `POST /api/brands { name }`.
+- The type scale is **points**, descending: `display 40 / title 32 / heading 24 / body 18 /
+  caption 12`. PPTX is the authority and CSS derives from it, never the reverse, so the two cannot
+  drift. `title`/`display` being ≥18pt is what makes the large-text threshold correct above.

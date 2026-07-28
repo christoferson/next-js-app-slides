@@ -1,9 +1,10 @@
 # SPEC §10 — multi-stage build, Next `output: 'standalone'`, single image.
 #
-# ⚠️ VERIFY: NOT yet smoke-tested. Docker is not installed on the development machine
-# (`docker --version` → command not found, 2026-07-27), so `docker build` + `docker run` remain
-# open §1.3 items. See VERIFICATION.md. The `next build --output standalone` step itself IS
-# verified locally (exit 0, no AWS credentials required).
+# ⚠️ VERIFY — THIS FILE HAS NEVER BEEN BUILT. Docker is not installed on the development machine
+# and the smoke test was skipped by decision (2026-07-28). Treat every line below as unproven:
+# in particular the non-root write access to /data and the standalone COPY paths. The
+# `next build` → `.next/standalone/server.js` output it targets IS verified (exit 0, no AWS
+# credentials needed). See VERIFICATION.md §1.3 for the exact commands to close this.
 
 # ── deps ──────────────────────────────────────────────────────────────────────
 FROM node:22-alpine AS deps
