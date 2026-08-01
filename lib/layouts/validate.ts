@@ -303,6 +303,56 @@ export function validateSlots(
 }
 
 /**
+ * Budget check for a PARTIAL slot set — the user-edit path (SPEC §7.4).
+ *
+ * Two things distinguish it from `validateSlots`:
+ *
+ *   - **Budgets are enforced, not truncated.** A model's over-long output is trimmed and flagged
+ *     (§1.1/C1 — truncation is our only overflow guard, and spending the repair call on cosmetics would
+ *     be waste). A *person's* is rejected with the field named, because silently rewriting what someone
+ *     typed is worse than telling them it does not fit.
+ *   - **Missing required slots are not errors.** The caller is patching a subset; the merged result is
+ *     what must be complete, and that is checked when the whole slide is normalized.
+ *
+ * Unknown keys are ignored here (the schema strips them) — `normalizeSlots` reports them as
+ * adjustments, which is the right place for a report about content rather than about a request.
+ */
+export function checkSlotBudgets(layout: SlideLayout, slots: SlotValues): SlotValidation {
+  const issues: SlotIssue[] = [];
+
+  for (const spec of layout.slots) {
+    const raw = slots[spec.key];
+    if (raw === undefined) continue;
+
+    if (spec.type === "list") {
+      if (!Array.isArray(raw)) continue;   // coercion is `normalizeSlots`'s job, not a budget problem
+      const itemMax = spec.itemMaxChars ?? spec.maxChars;
+      if (spec.maxItems !== undefined && raw.length > spec.maxItems) {
+        issues.push({
+          path: spec.key,
+          message: `must have ${spec.maxItems} item${spec.maxItems === 1 ? "" : "s"} or fewer`,
+        });
+      }
+      raw.forEach((item, index) => {
+        if (typeof item === "string" && item.trim().length > itemMax) {
+          issues.push({
+            path: `${spec.key}.${index}`,
+            message: `must be ${itemMax} characters or fewer`,
+          });
+        }
+      });
+      continue;
+    }
+
+    if (typeof raw === "string" && raw.trim().length > spec.maxChars) {
+      issues.push({ path: spec.key, message: `must be ${spec.maxChars} characters or fewer` });
+    }
+  }
+
+  return issues.length > 0 ? { ok: false, issues } : { ok: true, value: slots };
+}
+
+/**
  * Validate, then fit. The generation happy path: a response that parses is normalized rather than
  * rejected, so budget overruns cost a flag instead of a repair call.
  */

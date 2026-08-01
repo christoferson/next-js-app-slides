@@ -22,6 +22,14 @@ import type { LLMPort } from "@/lib/ports/llm-port";
 import {
   createAssetStore, createAuthProvider, createBrandRepository, createDeckRepository, createLLMPort,
 } from "@/lib/repositories/factory";
+import { registryLookup } from "@/lib/layouts/registry";
+import { createPromptLogger } from "@/lib/generation/prompt-log";
+import { ulid } from "@/lib/util/ids";
+import { BrandService } from "@/lib/services/brand-service";
+import { DeckService } from "@/lib/services/deck-service";
+import { GenerationService } from "@/lib/services/generation-service";
+import { LayoutMappingService } from "@/lib/services/layout-mapping-service";
+import { OutlineService } from "@/lib/services/outline-service";
 
 /**
  * The ports wired so far. This grows to the full `Ports` shape as §2 proceeds: `exporters` arrives
@@ -41,6 +49,24 @@ export interface Container {
    * a request actually generates something. A test can substitute a mocked port via `overrides`.
    */
   readonly llm: () => LLMPort;
+  /** §2 step 12. The facade (step 14) is assembled from exactly these. */
+  readonly services: Services;
+}
+
+/**
+ * The service layer, wired over the ports above.
+ *
+ * Services are constructed eagerly — unlike the LLM port — because none of them touches AWS or the
+ * filesystem at construction time; they only hold references. `GenerationService` and `OutlineService`
+ * receive the *thunk*, not a port, which is what preserves §1.3 through this layer: building the
+ * container must not resolve credentials even though two of its services will eventually need them.
+ */
+export interface Services {
+  readonly brands: BrandService;
+  readonly decks: DeckService;
+  readonly mapping: LayoutMappingService;
+  readonly outline: OutlineService;
+  readonly generation: GenerationService;
 }
 
 /**
@@ -48,9 +74,15 @@ export interface Container {
  * because selecting a backend is the common case; this exists for ports that have no in-memory
  * *backend* to select — an `LLMPort` is mocked with canned responses (§9), not swapped for a second
  * real implementation.
+ *
+ * `now`/`newId` are here for the same reason: a service test asserting a stored timestamp needs a fixed
+ * clock, and threading one through every service constructor from a test would duplicate the wiring
+ * this file exists to own. Defaults are the real thing.
  */
 export interface PortOverrides {
   llm?: LLMPort;
+  now?: () => number;
+  newId?: () => string;
 }
 
 export function createContainer(
@@ -59,13 +91,45 @@ export function createContainer(
 ): Container {
   const config: AppConfig = { ...loadConfig(), ...overrides };
   let llm = ports.llm;
+  const llmThunk = (): LLMPort => (llm ??= createLLMPort(config));
+
+  const brands = createBrandRepository(config);
+  const decks = createDeckRepository(config);
+  const assets = createAssetStore(config);
+
+  const now = ports.now ?? Date.now;
+  const newId = ports.newId ?? (() => ulid());
+  // Built once, not per prompt: `createPromptLogger` returns a shared no-op when the flag is off, so
+  // every `onPrompt?.()` in the pipelines costs one call rather than a per-request closure.
+  const onPrompt = createPromptLogger(config.debugPrompts);
+
+  const brandService = new BrandService({
+    brands, decks, assets, layouts: registryLookup, now, newId,
+  });
+  const deckService = new DeckService({ decks, now, newId });
+  const mapping = new LayoutMappingService();
+
   return {
     config,
-    brands: createBrandRepository(config),
-    decks: createDeckRepository(config),
-    assets: createAssetStore(config),
+    brands,
+    decks,
+    assets,
     auth: createAuthProvider(config),
-    llm: () => (llm ??= createLLMPort(config)),
+    llm: llmThunk,
+    services: {
+      brands: brandService,
+      decks: deckService,
+      mapping,
+      outline: new OutlineService({
+        decks: deckService, brands: brandService, mapping,
+        llm: llmThunk, modelId: config.outlineModelId, onPrompt,
+      }),
+      generation: new GenerationService({
+        slides: decks, decks: deckService, brands: brandService, mapping,
+        llm: llmThunk, modelId: config.defaultLlmModelId,
+        concurrency: config.generationConcurrency, now, newId, onPrompt,
+      }),
+    },
   };
 }
 

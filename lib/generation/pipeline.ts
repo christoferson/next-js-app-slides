@@ -8,10 +8,15 @@
  *
  * ## What this file deliberately does NOT do
  *
- * No persistence. `putSlide` belongs to `GenerationService` (§2 step 12), which owns the repository.
- * The pipeline emits events and returns content; that is what makes it testable against canned model
- * responses with no repository at all (§9's matrix), and it is also the queue seam SPEC §15 names — an
- * SQS worker replaces the *executor* below without touching the pipeline.
+ * It does not know about a repository. SPEC §7.3 puts `persist` in the fixed sequence (… fallback →
+ * **persist** → notify), so there is a `persist` hook — but it is a *callback*, supplied by
+ * `GenerationService`, which owns the `DeckRepository`. The pipeline stays testable against canned
+ * model responses with no repository at all (§9's matrix), and it remains the queue seam SPEC §15
+ * names — an SQS worker replaces the *executor* below without touching the pipeline.
+ *
+ * The ordering is load-bearing, not cosmetic: `slide-done` tells the client a slide exists. Emitting it
+ * before the write means a process death between the two leaves the client showing a slide that was
+ * never stored.
  *
  * ## Observer, and why it is a callback rather than an EventEmitter
  *
@@ -54,6 +59,14 @@ export interface GenerationDeps {
    * the user's briefing text, so logging them is opt-in, and the no-op costs one absent call.
    */
   onPrompt?: (label: string, prompt: string) => void;
+  /**
+   * SPEC §7.3's `persist` step. A callback rather than a repository, so this file keeps no storage
+   * dependency (see the header). `GenerationService` supplies one that calls `putSlide`.
+   *
+   * A throw here is NOT swallowed: unlike `emit`, a failed write means the slide does not exist, and
+   * reporting `slide-done` for it would be a lie. It surfaces as that slide's `internal` error.
+   */
+  persist?: (outcome: SlideOutcome) => Promise<void>;
 }
 
 export interface SlideJob {
@@ -108,10 +121,14 @@ export interface SlideGenerationRequest {
 /**
  * ONE slide, start to finish. The Template Method — the step sequence is fixed; the steps are injected.
  *
- * Always resolves. A slide that fails every handler still returns the fallback's content, because
- * §0.4's "never a blank slide, never a crashed job" is what the whole file is for. The one exception is
- * an abort, which rethrows: cancellation is not a slide failure, and §9 requires the remaining slides
- * to stop rather than each producing a fallback.
+ * Resolves for every *content* failure. A slide that fails every handler still returns the fallback's
+ * content, because §0.4's "never a blank slide, never a crashed job" is what the whole file is for.
+ * Two things do throw, and both are deliberate:
+ *
+ *   - an **abort** — cancellation is not a slide failure, and §9 requires the remaining slides to stop
+ *     rather than each producing a fallback;
+ *   - a **`persist` failure** — the slide does not exist, so there is no honest outcome to return.
+ *     `generateDeck` catches it, reports that slide as `internal`, and carries on with the rest.
  */
 export async function generateSlide(
   request: SlideGenerationRequest, deps: GenerationDeps,
@@ -164,8 +181,12 @@ export async function generateSlide(
 
   const content = await runSlideHandlers(attempt, request.handlers ?? SLIDE_HANDLERS);
   const degraded = content.issue !== undefined;
+  const outcome: SlideOutcome = { slideId: request.slideId, index: request.index, content, degraded };
 
-  // 4. notify — exactly one terminal event per slide. A degraded slide gets `slide-error` (so the UI
+  // 4. persist — BEFORE notifying, so `slide-done` never announces a slide that was not stored.
+  await deps.persist?.(outcome);
+
+  // 5. notify — exactly one terminal event per slide. A degraded slide gets `slide-error` (so the UI
   // can badge it) even though content EXISTS, which is the distinction §9's `{ok, failed}` counts on.
   emitSafely(deps, degraded
     ? {
@@ -178,7 +199,7 @@ export async function generateSlide(
       slideId: request.slideId, index: request.index, flags: content.flags,
     });
 
-  return { slideId: request.slideId, index: request.index, content, degraded };
+  return outcome;
 }
 
 /**

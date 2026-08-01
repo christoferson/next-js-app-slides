@@ -17,7 +17,11 @@ export type ErrorCode =
   | "SlideNotFound"
   | "InvalidBrandConfig"
   | "InvalidSlideOrder"
+  | "InvalidSlideContent"
+  | "UnknownLayout"
   | "AssetNotFound"
+  | "DeckNotReady"
+  | "UnknownExportFormat"
   // generation
   | "GenerationFailed"
   // model/adapter (mapped from Bedrock — shapes verified in §1.2)
@@ -38,7 +42,11 @@ const STATUS: Record<ErrorCode, number> = {
   SlideNotFound: 404,
   InvalidBrandConfig: 400,
   InvalidSlideOrder: 400,
+  InvalidSlideContent: 400,
+  UnknownLayout: 400,
   AssetNotFound: 404,
+  DeckNotReady: 409,
+  UnknownExportFormat: 400,
   GenerationFailed: 502,
   ModelAccessDenied: 502,
   ModelThrottled: 503,
@@ -102,9 +110,62 @@ export const InvalidSlideOrder = (reason: string, detail?: unknown) =>
   new AppError("InvalidSlideOrder", "That slide order couldn't be applied. Please reload and try again.",
     { detail: { reason, ...(detail && typeof detail === "object" ? detail : { detail }) } });
 
+/**
+ * A user's own slide edit that breaks a slot's budget (SPEC §7.4's inline editor).
+ *
+ * Deliberately NOT the same as the generation path's response to an over-long value. A model's output
+ * is truncated and flagged (§1.1/C1 — truncation is our only overflow guard), because the alternative
+ * is spending a repair call on cosmetics. A *person's* typing is rejected with the offending field
+ * named, because silently rewriting what someone wrote is worse than telling them it does not fit —
+ * and the editor already shows a live counter, so this is the backstop, not the first signal.
+ *
+ * `issues` are field-level so the editor can highlight the slot (§12).
+ */
+export const InvalidSlideContent = (issues: string[]) =>
+  new AppError("InvalidSlideContent", "That slide content doesn't fit the layout.", { detail: { issues } });
+
+/**
+ * A layoutId that is not in the registry, arriving from a request body or URL.
+ *
+ * Distinct from `requireLayout`'s throw, which is an internal invariant failure (a persisted slide
+ * naming a layout that was removed) and correctly surfaces as a 500. This one is the user's input being
+ * wrong, so it is a 400 — conflating them would either hide our own bug or blame the user for it.
+ */
+export const UnknownLayout = (layoutId: string, known: readonly string[]) =>
+  new AppError("UnknownLayout", "That slide layout isn't available.", { detail: { layoutId, known } });
+
 export const AssetNotFound = (id: string) =>
   new AppError("AssetNotFound", "A referenced image is missing.", { detail: { id } });
 
+/**
+ * A step was attempted before its prerequisite: generate slides with no outline, export with no slides,
+ * generate an outline with no briefing.
+ *
+ * **Not `GenerationFailed`.** That code is a 502 and means *the AI failed us*; this means the request
+ * arrived out of order, and nothing upstream was even called. Conflating them would put "fill in the
+ * briefing" behind a Bad Gateway with `retryable: false`, telling the user to wait for a service that is
+ * working fine.
+ *
+ * 409 rather than 400: the request is well-formed, the deck's *state* is what does not permit it — and
+ * the fix is an action on the deck, not a correction to the request. `readable` names that action,
+ * because "which of the three wizard steps" is the entire useful content of the error.
+ */
+export const DeckNotReady = (readable: string, detail?: unknown) =>
+  new AppError("DeckNotReady", readable, { detail });
+
+/**
+ * A format segment naming an exporter this deployment doesn't have. The available list is in the
+ * readable text: a download URL is typed or bookmarked, and "pptx isn't available, try html" is
+ * actionable where "unsupported format" is not.
+ */
+export const UnknownExportFormat = (format: string, available: readonly string[]) =>
+  new AppError("UnknownExportFormat",
+    available.length > 0
+      ? `That export format isn't available. You can export as: ${available.join(", ")}.`
+      : "Exporting isn't available in this deployment.",
+    { detail: { format, available } });
+
+/** The AI genuinely failed — see `DeckNotReady` for the precondition case this must not absorb. */
 export const GenerationFailed = (readable: string, detail?: unknown) =>
   new AppError("GenerationFailed", readable, { detail });
 

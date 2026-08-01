@@ -1004,3 +1004,184 @@ to an `AppError`, and an abort stops between frames rather than draining the res
   and with empty sections dropped — the generation pipeline iterates this, not the raw outline.
 - The adapter returns text only. Extracting JSON from a fenced/prefixed response is `lib/generation`'s
   job (§9 row 3), deliberately not the adapter's.
+
+---
+
+## §2 step 11 — `lib/generation/*` COMPLETE (2026-08-01)
+
+`npm run verify` green: ESLint clean, both typecheck projects clean, **818 tests / 20 files**
+(was 544/15 at end of step 10; +274 across 5 new suites).
+
+| Suite | Tests | Covers |
+|---|---|---|
+| `tests/prompt-purity.test.ts` | 71 | **§7 core acceptance** — no visual vocabulary, and the guarantee's other half |
+| `tests/generation-matrix.test.ts` | 48 | **§9's table, verbatim** — Validate → Repair → Fallback through the real chain |
+| `tests/outline-generation.test.ts` | 73 | outline schema tiers + the no-fallback pipeline |
+| `tests/extract-json.test.ts` | 53 | §9 row 3's tolerant extractor, and its refusal to repair |
+| `tests/hints.test.ts` | 29 | the hint vocabulary, its §4 boundary, and the load-time coverage check |
+
+Eight implementation files, 1,756 lines: `hints.ts`, `extract-json.ts`, `prompts.ts`,
+`outline-schema.ts`, `handlers.ts`, `pipeline.ts`, `outline-pipeline.ts`, `prompt-log.ts`.
+
+### §7 — "no visual vocabulary in prompts" is now enforced in TWO places, deliberately
+
+The acceptance test builds prompts from a brand with greppable values (`#FF00AA`, font `zapfino`, a
+zone at `x:42`, `asset-bg-title`) and asserts none survive. That catches every leak **the fixture
+provokes** — and nothing else. A tone added later whose `promptFragment` mentions a colour, a slot
+description someone writes as "the large centred headline": both would pass a fixture-shaped test.
+
+So the same rule runs at runtime. `promptImpurities(prompt)` in `prompt-log.ts` is the shared
+predicate, and `DEBUG_PROMPTS=1` (§7's second requirement, now real) logs every prompt **with the
+verdict on its first line** — one log line answers "did the guarantee hold". The test imports the same
+function, so there is one rule, not two that can drift.
+
+Three decisions in the scanner worth recording:
+
+1. **Bare numbers are NOT matched, on purpose.** Slot budgets are numbers and belong in prompts. A
+   coordinate pattern loose enough to catch `"55 characters maximum"` would fire on every prompt, and
+   the fix under deadline pressure is to delete the test. There is a negative control asserting exactly
+   that string is clean.
+2. **The scanner's own negative controls come FIRST in the file.** A purity scanner that silently
+   matches nothing reports success forever, which is worse than no test at all.
+3. **Font terms are matched longest-first**, so `Times New Roman` is reported as itself rather than as
+   `Times`. Cosmetic for the assertion, load-bearing for the person reading the failure.
+
+**The guarantee's other half is asserted too**: purity must not be satisfiable by sending nothing. A
+block proves the tone fragment, the banned words, the briefing, and every slot's key + description +
+budget ARE present — including `it.each(TONES)` proving every registry fragment reaches a prompt, since
+a fragment that never arrives is dead data and the failure would be silent.
+
+**Layout `displayName`/`description` are withheld from slide prompts**, asserted directly. The scanner's
+patterns would not catch "full-bleed" or "Two column", so the builder's *omission* is what the test
+pins — those strings describe a layout to a human choosing one in the UI, and §7 keeps them out of the
+model's view.
+
+**One boundary is documented rather than fixed.** The repair prompt echoes the model's own bad output
+verbatim; if the model invented a hex code, it is in there. A test pins that and explains why scrubbing
+would be wrong: it would corrupt the text the model must repair, and nothing renders from a prompt.
+
+### §9 — the matrix is the table, transcribed as data
+
+`MATRIX` in `tests/generation-matrix.test.ts` is CLAUDE.md §9's eight rows as a `const`, each driven
+through the **real** chain — never a reimplementation. Three assertions run on every row regardless of
+what it is testing:
+
+- `Object.keys(slots).length > 0` — **§0.4: never a blank slide**, on every path including garbage in.
+- The user-facing message never matches `/zod|ValidationException|required/i` — internals do not leak.
+- Exactly one terminal event (`slide-done` XOR `slide-error`), so no row can double-emit or go silent.
+
+`Script` models a mid-stream failure as `{ text, throwsAfter }` — deltas, then a throw. That is the only
+honest reproduction of §9's "ThrottlingException mid-deck": a throw *before* any output is a different
+failure with a different recovery.
+
+Row-specific findings:
+
+- **The fallback is built from the OUTLINE, not from model output.** Asserted as
+  `expect(JSON.stringify(slots)).not.toContain("happy to help")` — a fallback that salvaged the
+  model's prose would put "I'd be happy to help!" on a slide.
+- **The repair pass runs at most once, and the ORIGINAL failure reason survives** when the repair call
+  itself throws. Otherwise a `trimmed`-worthy first attempt would be reported as a model error.
+- **A tolerant-extractor recovery spends NO repair call.** Repair exists for unusable content, not for
+  packaging.
+- **Abort yields `ok: 0, failed: 0`** for the cancelled remainder, and `result.outcomes` keeps the
+  completed slides. The remaining slides are *absent*, not failed — counting them as failures would
+  report a user's own cancellation as a defect.
+
+### `outline-pipeline.ts` has NO fallback, and both the file and a test say so
+
+The slide chain ends in a fallback because a deck with one weak slide beats no deck. The outline is the
+plan the whole deck is generated from, and a fabricated plan ("Introduction / Body / Conclusion" from
+the topic string) would be worse than an error — the user would generate 12 slides against it before
+noticing. So the outline path validates, repairs **once**, then throws readably.
+
+That asymmetry is why it is a separate file rather than a variant of `handlers.ts`: sharing the chain
+would mean sharing the fallback, and the fallback is exactly what must not exist here. "Add a fallback
+here too, for symmetry" is the change that would break it, so the header and a named test both
+pre-empt it.
+
+Three more decisions there:
+
+- **A model error propagates as itself.** `ModelThrottled` does not become `GenerationFailed` —
+  collapsing them would tell the user to rewrite a briefing that was never the problem.
+- **`OUTLINE_MAX_TOKENS = 8000`.** A `max_tokens` cut-off mid-JSON is unrecoverable by design (the
+  extractor refuses to close braces — see below), so the ceiling must be generous rather than tight.
+- **An out-of-range `sectionIndex` is rejected BEFORE the model is called**, with a distinct message, so
+  a stale client is not logged as a struggling model.
+
+A schema decision worth flagging: a slide count that misses the target is **advisory, not a validation
+failure** (§9's outline row says "surfaced", not "rejected"). Silent inside ±2; outside it, an advisory
+naming both numbers. `layoutOverride` is **stripped** from model output, though — a model that could pin
+a layout would outrank the entire mapping chain, including the user's own override.
+
+### The extractor recovers packaging and refuses to repair
+
+Most of `tests/extract-json.test.ts` asserts the **absence** of cleverness — no trailing-comma
+stripping, no quote fixing, no closing of unbalanced braces — because that is the property that erodes
+under a "just make this one case work" change. Silently reinterpreting broken output invents content the
+model never produced, and §9 already has the right answer for it.
+
+The specific case: a response truncated at `max_tokens` must return `undefined`, not a brace-closed
+object. Fabricating structure there produces a slide carrying content the model never finished writing.
+Its complement is also pinned: a *complete* object followed by truncated prose still parses.
+
+The brace scan is string- and escape-aware, and the cases are not exotic — a `{customerName}` token in
+marketing copy, a quoted statement with escaped quotes, a Windows path, a brace-heavy code sample.
+
+### Registry-derived fixtures — §4's rule applies to tests too
+
+`validResponseFor(layout)` generates a canned response from a layout's own `SlotSpec`s. This came out of
+a real failure: the deck-level test hand-wrote a `bullets`-shaped response for a 3-slide deck, but the
+real `mapOutline` produces `title` → `bullets` → `closing` (PositionalRule forces the boundaries), so
+slides 0 and 2 fell back and `ok` was 1 instead of 2. A stale hand-written fixture meeting the real
+mapping chain. Deriving from the registry means a new layout needs no edit here, and a layout whose
+budgets change cannot leave a stale fixture behind.
+
+The same failure taught a second lesson: the deck test now asserts the produced `layoutId`s **equal the
+mapped ones**, because otherwise the whole describe block would be asserting against accidental
+fallbacks.
+
+### Two real defects found by writing the tests
+
+1. **`isVisualHint` validated `"toString"`.** The guard was `value in HINT_DESCRIPTIONS`, and `in` walks
+   the prototype chain. A model answering `visualHint: "constructor"` would have passed the guard and
+   then read `HINT_DESCRIPTIONS[hint]` — a *function*, carried into a prompt. Now `Object.hasOwn`, used
+   by `hintCoverageProblems` too. This is §0.4 (LLM output is hostile input) landing in a place that
+   looked like static data.
+2. **A purity assertion was passing for the wrong reason.** The fixture's `voice: "wry"` is deliberately
+   unregistered, so `resolveTone` returns undefined and no fragment reaches the prompt — my `??`
+   fallback then asserted the *executive* fragment was present. Fixed by adding a second tone case (loud
+   traits, registry voice) and running every purity assertion over **both**, plus a test that an
+   unregistered voice omits the fragment without erroring while traits and banned words still land.
+
+Also self-caught: two rows of `tests/extract-json.test.ts` contradicted each other about array-wrapper
+recovery. The behaviour was right; the row was wrong. Resolved by pinning the actual rule — the first
+object in a multi-element array wins, because with two candidates there is no principled choice and
+merging would fabricate a response.
+
+### `HINT_DESCRIPTIONS` and the §4 parallel-table question
+
+It is a hint→string table, and §4 forbids parallel hardcoded tables. It earns its place by carrying
+what the registry does not: the *content shape* a hint implies, written for the model. hint→layout lives
+in `layoutsForIntent`. `tests/hints.test.ts` defends that boundary directly — no description may name a
+layout id or `displayName`, and none may use appearance words (`bulleted`, `centred`, `full-bleed`, …),
+which would be both §7 violations and lies whenever a brand's template renders that layout differently.
+
+The load-time `assertHintCoverage()` catches the silent failure: a layout declaring an intent no hint
+describes is never requested by the outline model. No error, no missing slide — just a layout that
+quietly never appears. The suite proves the check fires (not just that it passes) and asserts the
+reverse direction too: every described hint has ≥1 layout, so a hint the model can choose but nothing
+renders specially is caught as a wasted vocabulary entry.
+
+### Carry-forward for §2 step 12 (services)
+
+- `GenerationDeps.onPrompt?(label, prompt)` is the seam `DEBUG_PROMPTS` hangs off. The **repair** prompt
+  is built inside the handler, so the `repair` thunk's callback is the only place it can be logged —
+  services must pass `onPrompt` through, or repair prompts go unlogged and §7's debug mode is half real.
+- `generateOutline` **throws** on total failure and does not fabricate a plan. `OutlineService` must
+  surface that as a readable error, not paper over it with a synthetic outline.
+- A `ModelThrottled`/`ModelTimeout` from the outline path is that error, not `GenerationFailed`. Keep
+  them distinct at the service and route layers.
+- Per-slide isolation lives in `pipeline.ts` (`generateDeck`), which already returns
+  `{ outcomes, ok, failed }`. `GenerationService` wires `emit` to SSE; it must not add a second
+  try/catch layer that would swallow the per-slide reasons.
+- `createContainer(config, { llm: fake })` remains the no-AWS seam. Service tests use it.

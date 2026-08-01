@@ -55,8 +55,13 @@ export const hintVocabulary = (): string =>
  */
 export const hintOrder = (): VisualHint[] => Object.keys(HINT_DESCRIPTIONS) as VisualHint[];
 
+/**
+ * `Object.hasOwn`, not `in`: `in` walks the prototype chain, so `"toString" in HINT_DESCRIPTIONS` is
+ * true. A model answering `visualHint: "constructor"` would then pass this guard and reach
+ * `HINT_DESCRIPTIONS[hint]`, which is a function — a hostile-input hole, per §0.4.
+ */
 export const isVisualHint = (value: unknown): value is VisualHint =>
-  typeof value === "string" && value in HINT_DESCRIPTIONS;
+  typeof value === "string" && Object.hasOwn(HINT_DESCRIPTIONS, value);
 
 /* ─────────────────────────────── load-time invariant ─────────────────────────────── */
 
@@ -64,7 +69,7 @@ export function hintCoverageProblems(layouts: readonly { id: string; intents: re
   const problems: string[] = [];
   for (const layout of layouts) {
     for (const intent of layout.intents) {
-      if (!(intent in HINT_DESCRIPTIONS)) {
+      if (!isVisualHint(intent)) {
         problems.push(
           `layout "${layout.id}" claims intent "${intent}", which has no description in `
           + "HINT_DESCRIPTIONS — the outline model would never know to request it.",
