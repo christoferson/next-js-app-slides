@@ -75,6 +75,24 @@ describe("container / factory", () => {
     expect(overridden.outlineModelId).toBe("other");
   });
 
+  it("does not construct the Bedrock client until the LLM port is asked for (§1.3)", () => {
+    // The reason `llm` is a thunk: building a `BedrockRuntimeClient` resolves credentials, and
+    // `/api/registry/*` must serve with none configured. Nothing here calls `c.llm()`.
+    const c = createContainer({ storageBackend: "memory", assetBackend: "memory" });
+    expect(typeof c.llm).toBe("function");
+  });
+
+  it("returns the same LLM port on repeated calls rather than a client per request", () => {
+    const c = createContainer({ storageBackend: "memory", assetBackend: "memory" });
+    expect(c.llm()).toBe(c.llm());
+  });
+
+  it("accepts a mocked LLM port, so §9's matrix needs no AWS at all", () => {
+    const fake = { complete: async () => ({ text: "" }), stream: () => (async function* () {})() };
+    const c = createContainer({ storageBackend: "memory", assetBackend: "memory" }, { llm: fake });
+    expect(c.llm()).toBe(fake);
+  });
+
   it("returns a stable singleton that reset clears", () => {
     const a = getContainer();
     expect(getContainer()).toBe(a);

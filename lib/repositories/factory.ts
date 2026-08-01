@@ -7,8 +7,11 @@
  * service or route changes. The `memory` cases exist to prove that claim is already true.
  */
 
+import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
 import type { AppConfig } from "@/lib/config";
 import type { AssetStore, AuthProvider, BrandRepository, DeckRepository } from "@/lib/ports";
+import type { LLMPort } from "@/lib/ports/llm-port";
+import { BedrockLLMAdapter } from "@/lib/adapters/bedrock-llm-adapter";
 import { FileBrandRepository } from "@/lib/repositories/file/file-brand-repository";
 import { FileDeckRepository } from "@/lib/repositories/file/file-deck-repository";
 import { MemoryBrandRepository } from "@/lib/repositories/memory/memory-brand-repository";
@@ -55,4 +58,18 @@ export function createAuthProvider(config: AppConfig): AuthProvider {
     case "stub": return new StubAuthProvider(config.defaultUserId);
     default: return unreachable(config.authBackend, "createAuthProvider");
   }
+}
+
+/**
+ * The LLM port (§2 step 10). No backend switch yet — Bedrock is the only implementation, and a
+ * one-armed switch would be indirection with nothing behind it. When a second arrives it goes here,
+ * exactly like the repositories above.
+ *
+ * The `BedrockRuntimeClient` is built HERE rather than inside the adapter so that §3's rule holds
+ * literally: the adapter takes its client as a required dependency, which is also what makes its whole
+ * surface testable without AWS. Credentials come from the default provider chain (`AWS_PROFILE`, task
+ * role, …) — this file names none of them.
+ */
+export function createLLMPort(config: AppConfig): LLMPort {
+  return new BedrockLLMAdapter({ client: new BedrockRuntimeClient({ region: config.awsRegion }) });
 }

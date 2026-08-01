@@ -12,21 +12,22 @@
  * `/api/registry/*` be served with no AWS credentials and no DATA_DIR write (§1.3): nothing is
  * constructed until a request actually needs it.
  *
- * Tests build their own container via `createContainer(configOverrides)`, proving the container
- * itself is swappable rather than a hardcoded prod wiring (§3).
+ * Tests build their own container via `createContainer(configOverrides, portOverrides)`, proving the
+ * container itself is swappable rather than a hardcoded prod wiring (§3).
  */
 
 import { loadConfig, type AppConfig } from "@/lib/config";
 import type { AssetStore, AuthProvider, BrandRepository, DeckRepository } from "@/lib/ports";
+import type { LLMPort } from "@/lib/ports/llm-port";
 import {
-  createAssetStore, createAuthProvider, createBrandRepository, createDeckRepository,
+  createAssetStore, createAuthProvider, createBrandRepository, createDeckRepository, createLLMPort,
 } from "@/lib/repositories/factory";
 
 /**
- * The ports wired so far. This grows to the full `Ports` shape as §2 proceeds: `llm` arrives with
- * the Bedrock adapter (step 10) and `exporters` with the PPTX exporter (step 13). Naming the
- * subset explicitly — rather than typing this as `Partial<Ports>` — means a consumer can never
- * reach for a port that isn't wired yet and get `undefined` at runtime.
+ * The ports wired so far. This grows to the full `Ports` shape as §2 proceeds: `exporters` arrives
+ * with the PPTX exporter (step 13). Naming the subset explicitly — rather than typing this as
+ * `Partial<Ports>` — means a consumer can never reach for a port that isn't wired yet and get
+ * `undefined` at runtime.
  */
 export interface Container {
   readonly config: AppConfig;
@@ -34,16 +35,37 @@ export interface Container {
   readonly decks: DeckRepository;
   readonly assets: AssetStore;
   readonly auth: AuthProvider;
+  /**
+   * Lazy, unlike the others. Constructing a `BedrockRuntimeClient` resolves credentials, and §1.3
+   * requires `/api/registry/*` to be served with none configured — so the client must not exist until
+   * a request actually generates something. A test can substitute a mocked port via `overrides`.
+   */
+  readonly llm: () => LLMPort;
 }
 
-export function createContainer(overrides: Partial<AppConfig> = {}): Container {
+/**
+ * Pre-built ports, substituted instead of constructed. Config overrides stay the first parameter
+ * because selecting a backend is the common case; this exists for ports that have no in-memory
+ * *backend* to select — an `LLMPort` is mocked with canned responses (§9), not swapped for a second
+ * real implementation.
+ */
+export interface PortOverrides {
+  llm?: LLMPort;
+}
+
+export function createContainer(
+  overrides: Partial<AppConfig> = {},
+  ports: PortOverrides = {},
+): Container {
   const config: AppConfig = { ...loadConfig(), ...overrides };
+  let llm = ports.llm;
   return {
     config,
     brands: createBrandRepository(config),
     decks: createDeckRepository(config),
     assets: createAssetStore(config),
     auth: createAuthProvider(config),
+    llm: () => (llm ??= createLLMPort(config)),
   };
 }
 

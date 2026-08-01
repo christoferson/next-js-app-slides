@@ -881,3 +881,126 @@ so a candidate layout can be validated in isolation — which §10's one-file pr
   a hint without a layout fails the build rather than silently falling through to `bullets`.
 - `layoutSummaries()` is the API-safe projection: no `FallbackRenderer`, no `toPptx`, JSON
   round-trips (asserted). `/api/registry/layouts` returns exactly this.
+
+---
+
+## §2 steps 9–10 — mapping + models/adapter COMPLETE (2026-07-30)
+
+`npm run verify` green: ESLint clean, both typecheck projects clean, **544 tests / 15 files**
+(was 397/12 at end of step 8; +147 across 3 new suites).
+
+| Suite | Tests | Covers |
+|---|---|---|
+| `tests/mapping-rules.test.ts` | 51 | the CoR: each rule, and precedence between them |
+| `tests/model-registry.test.ts` | 45 | registry invariants, `clampTemperature`, both family strategies |
+| `tests/bedrock-adapter.test.ts` | 47 | `mapModelError` table + `complete`/`stream` against a fake `send` |
+| `tests/container.test.ts` | +3 | the LLM port's laziness and its mock seam |
+
+### Step 9 — `lib/mapping/rules.ts` (SPEC §7.2)
+
+The chain is `UserOverride → Positional → IntentMatch → Fallback`, and **its order is the
+specification** — a rearrangement is a behaviour change, asserted directly.
+
+Deliberately deterministic rather than an LLM call: SPEC requires a per-slide mapping badge that
+explains *why* a layout was chosen. If the reason were a model's, the user's override would be a guess
+against an unexplained decision. Every rule returns a `reason` string; `mapOutline` asserts none is
+blank, because the badge always renders one.
+
+Decisions worth recording, each with a test:
+
+1. **A stale `layoutOverride` is IGNORED, not fatal.** A layout can be removed between an outline
+   being saved and the deck being generated. Honouring the id would render an unknown layout;
+   throwing would fail a whole deck over a registry edit. It falls through to the rest of the chain.
+2. **Opening beats closing in a one-slide deck.** A deck that only opens is coherent; one that only
+   closes is not.
+3. **The first section gets no divider** — it would immediately repeat the title slide. Nor does a
+   section with a blank heading, since the divider's only content *is* the heading (an empty slide).
+4. **Position beats intent.** A first slide hinting `list` is still the title slide: the model is
+   describing the opening's content, not its role in the deck. This is the rule most likely to look
+   like a bug and is not, hence the named test.
+5. **Empty sections are skipped before positions are assigned**, so a model returning one cannot cost
+   the deck its closing slide or manufacture a divider.
+6. **Registry order is a precedence declaration.** `bullets` claims both `list` and `detail`;
+   `layoutsForIntent(hint)[0]` wins, asserted against the array rather than a hardcoded id.
+
+The intent table in the test is **built FROM the registry** (`layoutsForIntent(hint)[0]?.id`), not
+written alongside it. A hardcoded `hint → layoutId` table in a test is exactly the parallel-table leak
+§10 exists to catch, and it would have hidden it. `layoutForHint` (the picker's ordering) is asserted
+to agree with `intentMatchRule` for every intent every layout claims — the one case where the
+highlighted option and the badge answer the same question.
+
+### Step 10 — `lib/models/*` + `lib/adapters/bedrock-llm-adapter.ts`
+
+**Everything on the wire is §1.2-measured, and the tests say which facts came from where.** The
+mandatory `anthropic_version` / `max_tokens` pair, the block-array content shape, the delta path, and
+the 8-row error table are all transcribed from the spike, not remembered.
+
+Three findings/decisions:
+
+1. **The inference-profile prefix is a load-time invariant, not a review item.** §1.2 proved
+   `anthropic.claude-opus-5` fails ("on-demand throughput isn't supported") while
+   `us.anthropic.claude-opus-5` works. The bare id is what one writes from memory and looks *more*
+   correct — Prime Directive #1's exact failure mode — so `assertRegistryInvariants()` runs at module
+   load and `requireModel` rejects an unregistered id **before** any Bedrock call. Asserted both ways.
+2. **`parseCompletion` joins ALL text blocks rather than reading `content[0].text`.** The spike
+   observed one block, so the indexed read matches the measurement — but a response with a leading
+   non-text block would silently yield `undefined`, i.e. an empty slide instead of an error. Joining
+   is correct for the observed shape and safe for the other one. This is a deliberate divergence from
+   the literal §1.2 note, recorded here so it doesn't read as drift.
+3. **`verified: true` marks only the model actually invoked** (`us.anthropic.claude-opus-5`). The other
+   two were enumerated as ACTIVE but never round-tripped, and a test pins that ratio — so a first-use
+   failure reads as a known ⚠️ VERIFY item rather than a regression.
+
+**Abort is distinguishable from failure.** Found while writing the stream tests: `throwIfAborted` sat
+inside `stream`'s `try`, so a client cancellation was mapped to `ModelTimeout` — indistinguishable
+from a real timeout, which is precisely the distinction §9's abort row needs ("remaining slides stop,
+completed slides persisted" vs "this slide errors, the deck continues"). Both entry points now rethrow
+aborts unmapped. The `AbortError` branch inside `mapModelError` survives only because the function's
+return type is `AppError`; it is a defensive path, and the comment says so.
+
+**A §3 violation was caught by the automated grep, not by review.** The adapter had
+`client ?? new BedrockRuntimeClient({ region })` as a test seam — which made it a *second* place a
+concrete implementation is constructed, contradicting its own header comment.
+`tests/architecture.test.ts` failed on it. Fixes:
+
+- `client` is now a **required** `BedrockSender` (`Pick<BedrockRuntimeClient, "send">`), and the
+  `BedrockRuntimeClient` import is type-only;
+- `createLLMPort(config)` in `lib/repositories/factory.ts` builds the real client — one more factory
+  function, matching the repository pattern exactly;
+- `container.llm` is a **thunk**, unlike the other ports. Constructing a client resolves credentials,
+  and §1.3 requires `/api/registry/*` to serve with none configured, so it must not exist until a
+  request generates something. `createContainer(config, { llm })` substitutes a mock, which is how
+  §9's canned-response matrix will run with no AWS at all.
+
+Worth noting the scanner is text-based: it later matched the phrase `new BedrockRuntimeClient(` inside
+a *comment* explaining the fix. Rewording the comment was the right response — weakening the regex
+would have cost the check that just earned its keep.
+
+**What the adapter tests assert is the contract with the layers around it**, not the SDK:
+the body sent is the family's (so schema knowledge lives in one place), an unregistered id never
+reaches Bedrock, a raw SDK error never escapes, valid-JSON-of-unexpected-shape returns empty text
+rather than throwing (the Validate→Repair→Fallback chain decides what empty means — §0.4), a single
+malformed stream frame is skipped rather than discarding the slide, a mid-stream throttle still maps
+to an `AppError`, and an abort stops between frames rather than draining the response.
+
+### ⚠️ VERIFY — step 10's additions
+
+3. **`AccessDeniedException` and `ThrottlingException` mappings are unverified shapes.** Not
+   reproducible in this account: the credentials are admin (nothing is access-denied) and throttling
+   cannot be triggered without abusing the account. Mapped from documented shapes. `ERROR_TABLE` in
+   `tests/bedrock-adapter.test.ts` carries a `spikeVerified` flag and a test asserting these are the
+   only two false rows — so adding another unmeasured mapping fails until this list is updated.
+4. **`contextWindow: 200_000` on all three entries is not measured.** Bedrock does not report it via
+   `ListFoundationModels`. Used solely to bound `maxTokens`, where being conservative costs nothing.
+
+### Carry-forward for §2 step 11 (generation)
+
+- `container.llm()` is the only way to reach a model; `createContainer(config, { llm: fake })` is the
+  seam §9's matrix uses. No test should ever construct a `BedrockRuntimeClient`.
+- `isTruncatedStopReason(stopReason)` is how a `max_tokens` cut-off is detected — in a stream it is
+  otherwise invisible (the text simply ends). `streamStopReason` reads it from `message_delta`, which
+  is where it lives; `message_stop` does not carry it.
+- `mapOutline(outline)` returns `{ position, decision }` per slide, already flattened across sections
+  and with empty sections dropped — the generation pipeline iterates this, not the raw outline.
+- The adapter returns text only. Extracting JSON from a fenced/prefixed response is `lib/generation`'s
+  job (§9 row 3), deliberately not the adapter's.
