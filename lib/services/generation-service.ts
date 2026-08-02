@@ -10,8 +10,9 @@
  *     exposes it as a callback precisely so it can stay free of any repository (see that file's header).
  *     This is the callback: `SlideOutcome` → a `Slide` record, written before `slide-done` is emitted.
  *  3. **Identity that the pipeline cannot know.** `order`, `createdAt`, and the outline `source` are
- *     per-slide facts held here — which is why `slidePlan` is a map rather than derived from
- *     `outcome.index`: on the regenerate path the index is 0 and the order is wherever the slide sits.
+ *     per-slide facts held here — which is why `slidePlan` is a map keyed by slide id rather than by
+ *     `outcome.index`: the regenerate path runs one slide, so an index-keyed lookup would only work by
+ *     coincidence of the two numbers agreeing.
  *
  * ## What this layer deliberately does NOT do
  *

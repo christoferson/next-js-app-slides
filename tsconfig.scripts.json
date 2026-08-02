@@ -14,7 +14,20 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "types": ["node"]
+    "types": ["node"],
+    // Matches `tsconfig.json`. A script that drives the real exporter imports the layout registry,
+    // whose entries are `.tsx` (each layout carries its React `FallbackRenderer` alongside its
+    // `toPptx` — that co-location is §4's one-file rule). Nothing here RENDERS React; tsx only needs
+    // to parse the files. `noEmit` is already on, so this affects typechecking only.
+    "jsx": "react-jsx",
+    // Mirrors `tsconfig.json`'s mapping. A script that drives the real app code (step 13's fixture
+    // deck goes through the actual container + exporter) transitively pulls in `lib/**`, and every
+    // module in there imports its siblings as `@/lib/...`. Without this the scripts project cannot
+    // resolve those — the alternative, hand-built duplicates of app logic, is what the spikes do and
+    // is exactly what must NOT happen for a verification artifact meant to prove OUR code is right.
+    // No `baseUrl`: it is deprecated in TS 6.0 and removed in 7.0, and `paths` is resolved relative to
+    // this config file without it — which is what `tsconfig.json` already relies on.
+    "paths": { "@/*": ["./*"] }
   },
   "include": ["scripts/**/*.ts"]
 }

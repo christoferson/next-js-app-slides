@@ -28,7 +28,7 @@
  * wiring mistake instead of in the downloaded file.
  */
 
-import type { DeckMeta, Slide } from "@/lib/domain/deck";
+import type { Slide } from "@/lib/domain/deck";
 import type { BrandDefinition, DesignTokens } from "@/lib/brand/types";
 import type { ExportRequest, ExportResult, Exporter } from "@/lib/ports/exporter";
 import { DeckNotReady, UnknownExportFormat } from "@/lib/errors/errors";
@@ -105,21 +105,14 @@ export class ExportService {
 /* ─────────────────────────── pure helpers ─────────────────────────── */
 
 /**
- * A filesystem-safe download name derived from the deck title.
+ * The download-name sanitizer, re-exported.
  *
- * Exported for the exporters to share: `ExportResult.filename` is set per format, and two exporters
- * each writing their own sanitizer is how one of them ends up emitting a name with a `/` in it. The
- * character class is a whitelist rather than a blacklist — a blacklist has to enumerate every reserved
- * character on every platform, and misses the next one.
+ * It LIVES in `lib/util/filename.ts` because both sides of a §5 boundary need it: `ExportResult.filename`
+ * is produced inside `lib/export/**`, which is forbidden from importing `lib/services/**`. Re-exported
+ * from here because this is the layer a caller reaches for when it wants a `Content-Disposition` name,
+ * and because the alternative — two copies — is how one of them ends up emitting a name with a `/` in it.
  */
-export function exportFilename(deck: Pick<DeckMeta, "title">, extension: string): string {
-  const base = deck.title
-    .normalize("NFKD")
-    .replace(/[^\p{L}\p{N}]+/gu, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-  return `${base === "" ? "deck" : base}.${extension}`;
-}
+export { exportFilename } from "@/lib/util/filename";
 
 /** Narrow re-export so a caller need not import the port to name what it received. */
 export type { ExportRequest, ExportResult, BrandDefinition, DesignTokens, Slide };

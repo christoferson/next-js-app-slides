@@ -403,7 +403,9 @@ describe("GenerationService — regenerating one slide (§7.4)", () => {
       emit: recorder().emit, instruction: "punchier",
     });
 
-    expect(outcome).toMatchObject({ slideId: target.id, index: 0, degraded: false });
+    // `index` is the slide's position in the DECK, not its position in this one-slide run — which is
+    // also what lets a client locate the slide the events refer to.
+    expect(outcome).toMatchObject({ slideId: target.id, index: target.order, degraded: false });
     const after = await h.services.decks.getSlide(h.userId, deck.id, target.id);
     // A new id would break every reference the open workspace holds — selection, scroll position, and
     // the SSE frames already delivered.
@@ -441,7 +443,7 @@ describe("GenerationService — regenerating one slide (§7.4)", () => {
     expect(after.slots.quote).toBeDefined();
   });
 
-  it("tells the model the deck's real length, not 1", async () => {
+  it("tells the model where in the deck the slide sits, not 'slide 1 of 1'", async () => {
     const h = harness();
     const { deck } = await readyDeck(h);
     scriptCleanDeck(h);
@@ -451,8 +453,10 @@ describe("GenerationService — regenerating one slide (§7.4)", () => {
     h.llm.push({ text: slideResponseFor(requireLayout(target.layoutId)) });
     await h.services.generation.regenerateSlide(h.userId, deck.id, target.id, { emit: recorder().emit });
 
-    // `total: 1` would make the slide read as both the opening and the close, and skew scope guidance.
-    expect(h.llm.calls.at(-1)?.prompt).toContain("Slide 1 of 3");
+    // BOTH coordinates are the deck's. `total: 1` would make the slide read as both the opening and the
+    // close; `index: 0` with a real total makes every regenerated slide read as the opener. This test
+    // caught the second — the service passed a hardcoded 0 while reading the real `total`.
+    expect(h.llm.calls.at(-1)?.prompt).toContain("Slide 2 of 3");
   });
 
   it("refuses a hand-added slide, which has no outline entry to regenerate from", async () => {

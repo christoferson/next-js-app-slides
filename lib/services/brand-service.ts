@@ -27,7 +27,7 @@
  */
 
 import type { AssetStore, BrandRepository, DeckRepository } from "@/lib/ports";
-import type { AssetMeta, ResolvedAsset } from "@/lib/domain/asset";
+import type { AssetMeta, ReadableAsset, ResolvedAsset } from "@/lib/domain/asset";
 import type { BrandDefinition, BrandSummary, DesignTokens, LayoutTemplate } from "@/lib/brand/types";
 import {
   type BrandInput, type LayoutLookup, describeIssues, validateBrand, validateBrandInput,
@@ -81,6 +81,24 @@ export class BrandService {
   async themeFor(userId: string, brandId: string): Promise<{ brand: BrandDefinition; tokens: DesignTokens }> {
     const brand = await this.get(userId, brandId);
     return { brand, tokens: compileTheme(brand) };
+  }
+
+  /**
+   * Read an asset's bytes as a stream, for the `/api/assets/:id` serving route.
+   *
+   * Both asset stores return `/api/assets/{assetId}` from `resolveUrl` with **no userId in the path** —
+   * deliberately, so a serving URL cannot be used to probe another user's partition. That makes the
+   * scoping entirely this call's `userId` argument: the route resolves the principal and passes it, and
+   * an id belonging to someone else raises `AssetNotFound` from the store rather than 403, so the URL
+   * space cannot be enumerated to learn which ids exist.
+   *
+   * It lives on `BrandService` because assets are brand assets — this is the layer that already owns the
+   * `AssetStore` port — and it exists at all because the facade may not touch a port directly (§5). Note
+   * it does NOT go through `resolveOrSkip`: a *serving* request for missing bytes is a 404, not something
+   * to silently degrade the way a render path does.
+   */
+  getAssetStream(userId: string, assetId: string): Promise<ReadableAsset> {
+    return this.deps.assets.getStream(userId, assetId);
   }
 
   /**

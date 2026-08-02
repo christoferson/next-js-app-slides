@@ -74,18 +74,26 @@ export interface BulletOptions {
 /**
  * Build bullet runs. **`breakLine` is stamped on every item** — that is the entire reason this
  * function exists (C5). Nothing else may construct bullet runs.
+ *
+ * It now carries a second mandatory stamp for numbered lists. pptxgenjs emits
+ * `<a:buAutoNum startAt="N"/>` on every numbered paragraph and defaults N to 1, and in OOXML a
+ * `startAt` RESTARTS the sequence — so a six-item agenda rendered "1. 1. 1. 1. 1. 1.". Passing each
+ * item its own 1-based position makes every paragraph's declared start match where it actually is.
+ * Both directions verified in `scripts/verify-pptx-numbering.ts`; the empty-item filter runs BEFORE
+ * numbering so a blank entry cannot leave a gap in the sequence.
  */
 export function bulletRuns(
   items: readonly string[], options: BulletOptions = {},
 ): PptxTextRun[] {
-  const bullet = options.type === "number" ? { type: "number" as const } : true;
   return items
     .map((item) => item.trim())
     .filter((item) => item !== "")
-    .map((text) => ({
+    .map((text, index) => ({
       text,
       options: {
-        bullet,
+        bullet: options.type === "number"
+          ? { type: "number" as const, numberStartAt: index + 1 }
+          : true,
         // MANDATORY. Without it a shape-level `align` collapses every item into one paragraph.
         breakLine: true,
         ...(options.indentLevel === undefined ? {} : { indentLevel: options.indentLevel }),

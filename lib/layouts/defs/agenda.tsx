@@ -9,7 +9,7 @@
 import type { ReactNode } from "react";
 import type { PptxTarget, RenderArgs, SlideLayout } from "@/lib/layouts/types";
 import {
-  AccentRule, accentRulePptx, isTemplated, paintPptx, paintPreview, type SlotPaint,
+  AccentRuleAbove, accentRuleAbovePptx, paintPptx, paintPreview, type SlotPaint,
 } from "@/lib/layouts/paint";
 import { SlideFrame } from "@/lib/layouts/preview";
 
@@ -18,7 +18,8 @@ const PAINT: readonly SlotPaint[] = [
   { slotKey: "items", face: "body", role: "body", color: "onBackground", marker: "number" },
 ];
 
-const RULE = { x: 8, y: 24, w: 10 } as const;
+/** Rule width only; x/y are derived from the live `title` zone by `ruleAboveZone`. */
+const RULE_W = 10;
 
 export const agendaLayout: SlideLayout = {
   id: "agenda",
@@ -49,13 +50,13 @@ export const agendaLayout: SlideLayout = {
 
   FallbackRenderer: (args: RenderArgs): ReactNode => (
     <SlideFrame tokens={args.tokens}>
-      <AccentRule tokens={args.tokens} {...RULE} />
+      <AccentRuleAbove args={args} slotKey="title" w={RULE_W} />
       {paintPreview(args, PAINT)}
     </SlideFrame>
   ),
 
   toPptx(target: PptxTarget, args: RenderArgs): void {
-    if (!isTemplated(args)) accentRulePptx(target, args.tokens, RULE.x, RULE.y, RULE.w);
+    accentRuleAbovePptx(target, args, "title", RULE_W);
     paintPptx(target, args, PAINT);
   },
 };

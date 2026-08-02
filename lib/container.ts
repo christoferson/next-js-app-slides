@@ -18,9 +18,11 @@
 
 import { loadConfig, type AppConfig } from "@/lib/config";
 import type { AssetStore, AuthProvider, BrandRepository, DeckRepository } from "@/lib/ports";
+import type { Exporter } from "@/lib/ports/exporter";
 import type { LLMPort } from "@/lib/ports/llm-port";
 import {
-  createAssetStore, createAuthProvider, createBrandRepository, createDeckRepository, createLLMPort,
+  createAssetStore, createAuthProvider, createBrandRepository, createDeckRepository, createExporters,
+  createLLMPort,
 } from "@/lib/repositories/factory";
 import { registryLookup } from "@/lib/layouts/registry";
 import { createPromptLogger } from "@/lib/generation/prompt-log";
@@ -30,12 +32,15 @@ import { DeckService } from "@/lib/services/deck-service";
 import { GenerationService } from "@/lib/services/generation-service";
 import { LayoutMappingService } from "@/lib/services/layout-mapping-service";
 import { OutlineService } from "@/lib/services/outline-service";
+import { ExportService } from "@/lib/services/export-service";
+import { StudioFacade } from "@/lib/facade/studio-facade";
 
 /**
- * The ports wired so far. This grows to the full `Ports` shape as §2 proceeds: `exporters` arrives
- * with the PPTX exporter (step 13). Naming the subset explicitly — rather than typing this as
- * `Partial<Ports>` — means a consumer can never reach for a port that isn't wired yet and get
- * `undefined` at runtime.
+ * Every port, wired. This now matches the full `Ports` shape (`lib/ports/index.ts`) — the subset note
+ * that stood here through steps 6–12 is gone because `exporters` was the last one outstanding.
+ *
+ * Still named field-by-field rather than typed as `Ports`, because two fields deliberately differ from
+ * it: `llm` is a thunk (see below) and `config`/`services` are not ports at all.
  */
 export interface Container {
   readonly config: AppConfig;
@@ -44,13 +49,23 @@ export interface Container {
   readonly assets: AssetStore;
   readonly auth: AuthProvider;
   /**
+   * Keyed by `Exporter.format` (§2 step 13). Eager: an exporter holds no client and touches no
+   * filesystem until `export` is called, so constructing it costs nothing and §1.3 is unaffected.
+   */
+  readonly exporters: Readonly<Record<string, Exporter>>;
+  /**
    * Lazy, unlike the others. Constructing a `BedrockRuntimeClient` resolves credentials, and §1.3
    * requires `/api/registry/*` to be served with none configured — so the client must not exist until
    * a request actually generates something. A test can substitute a mocked port via `overrides`.
    */
   readonly llm: () => LLMPort;
-  /** §2 step 12. The facade (step 14) is assembled from exactly these. */
+  /** §2 step 12. The facade is assembled from exactly these, plus `auth`. */
   readonly services: Services;
+  /**
+   * §2 step 14 — what routes actually use. Eager for the same reason the services are: it holds
+   * references and constructs nothing, so building it cannot resolve credentials (§1.3).
+   */
+  readonly facade: StudioFacade;
 }
 
 /**
@@ -67,6 +82,7 @@ export interface Services {
   readonly mapping: LayoutMappingService;
   readonly outline: OutlineService;
   readonly generation: GenerationService;
+  readonly export: ExportService;
 }
 
 /**
@@ -108,28 +124,38 @@ export function createContainer(
   });
   const deckService = new DeckService({ decks, now, newId });
   const mapping = new LayoutMappingService();
+  const exporters = createExporters(config);
+  const auth = createAuthProvider(config);
+
+  // Named before the return so the facade can be assembled from the SAME instances the container
+  // exposes — building it inline would give routes a facade over one set of services while
+  // `container.services` handed tests a second, independently-constructed set.
+  const services: Services = {
+    brands: brandService,
+    decks: deckService,
+    mapping,
+    outline: new OutlineService({
+      decks: deckService, brands: brandService, mapping,
+      llm: llmThunk, modelId: config.outlineModelId, onPrompt,
+    }),
+    generation: new GenerationService({
+      slides: decks, decks: deckService, brands: brandService, mapping,
+      llm: llmThunk, modelId: config.defaultLlmModelId,
+      concurrency: config.generationConcurrency, now, newId, onPrompt,
+    }),
+    export: new ExportService({ decks: deckService, brands: brandService, exporters }),
+  };
 
   return {
     config,
     brands,
     decks,
     assets,
-    auth: createAuthProvider(config),
+    auth,
+    exporters,
     llm: llmThunk,
-    services: {
-      brands: brandService,
-      decks: deckService,
-      mapping,
-      outline: new OutlineService({
-        decks: deckService, brands: brandService, mapping,
-        llm: llmThunk, modelId: config.outlineModelId, onPrompt,
-      }),
-      generation: new GenerationService({
-        slides: decks, decks: deckService, brands: brandService, mapping,
-        llm: llmThunk, modelId: config.defaultLlmModelId,
-        concurrency: config.generationConcurrency, now, newId, onPrompt,
-      }),
-    },
+    services,
+    facade: new StudioFacade({ auth, ...services }),
   };
 }
 
@@ -139,6 +165,15 @@ let singleton: Container | undefined;
 export function getContainer(): Container {
   singleton ??= createContainer();
   return singleton;
+}
+
+/**
+ * What a route imports. Routes need the facade and nothing else — offering this instead of making them
+ * reach through `getContainer().services` is what keeps §5's "routes call lib/facade, not services"
+ * a matter of there being no path to a service rather than a rule to remember.
+ */
+export function getFacade(): StudioFacade {
+  return getContainer().facade;
 }
 
 /** Test-only escape hatch, so one test's container can't leak into the next. */

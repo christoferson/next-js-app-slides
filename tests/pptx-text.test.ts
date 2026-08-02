@@ -61,9 +61,28 @@ describe("C5 — breakLine on every bullet run", () => {
     for (const run of bulletRuns(["a", "b"])) expect(run.options?.bullet).toBe(true);
   });
 
-  it("carries numbering on every item when asked, not only the first", () => {
+  it("numbers items 1..n, so an agenda does not render as \"1. 1. 1.\"", () => {
+    // This test's previous assertion was `toEqual({type:'number'})` for every run — which passed
+    // while the deck rendered every item as "1.". pptxgenjs writes `<a:buAutoNum startAt="N"/>` on
+    // EVERY numbered paragraph and defaults N to 1, and in OOXML a `startAt` restarts the sequence,
+    // so identical options across items is precisely the bug rather than the fix. Caught by eye in
+    // the step-13 fixture render; the mechanism is probed in `scripts/verify-pptx-numbering.ts`.
     const runs = bulletRuns(["a", "b", "c"], { type: "number" });
-    for (const run of runs) expect(run.options?.bullet).toEqual({ type: "number" });
+    expect(runs.map((r) => r.options?.bullet)).toEqual([
+      { type: "number", numberStartAt: 1 },
+      { type: "number", numberStartAt: 2 },
+      { type: "number", numberStartAt: 3 },
+    ]);
+  });
+
+  it("numbers from the kept items, so a blank entry does not leave a gap", () => {
+    // Filtering happens before numbering. If it did not, dropping item 2 would emit 1,3,4 — a list
+    // that looks like it lost an entry, which is worse than the blank it was avoiding.
+    const runs = bulletRuns(["first", "  ", "second"], { type: "number" });
+    expect(runs.map((r) => r.options?.bullet)).toEqual([
+      { type: "number", numberStartAt: 1 },
+      { type: "number", numberStartAt: 2 },
+    ]);
   });
 
   it("drops blank and whitespace-only items rather than emitting empty paragraphs", () => {

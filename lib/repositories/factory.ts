@@ -10,8 +10,10 @@
 import { BedrockRuntimeClient } from "@aws-sdk/client-bedrock-runtime";
 import type { AppConfig } from "@/lib/config";
 import type { AssetStore, AuthProvider, BrandRepository, DeckRepository } from "@/lib/ports";
+import type { Exporter } from "@/lib/ports/exporter";
 import type { LLMPort } from "@/lib/ports/llm-port";
 import { BedrockLLMAdapter } from "@/lib/adapters/bedrock-llm-adapter";
+import { PptxExporter } from "@/lib/export/pptx-exporter";
 import { FileBrandRepository } from "@/lib/repositories/file/file-brand-repository";
 import { FileDeckRepository } from "@/lib/repositories/file/file-deck-repository";
 import { MemoryBrandRepository } from "@/lib/repositories/memory/memory-brand-repository";
@@ -72,4 +74,19 @@ export function createAuthProvider(config: AppConfig): AuthProvider {
  */
 export function createLLMPort(config: AppConfig): LLMPort {
   return new BedrockLLMAdapter({ client: new BedrockRuntimeClient({ region: config.awsRegion }) });
+}
+
+/**
+ * The exporters this deployment can produce, keyed by format (§2 step 13).
+ *
+ * A map rather than a switch because format selection is *not* a backend choice: SPEC §12 names
+ * `Html`/`Pdf` as later formats, and a deployment offers all of them at once. Adding one is one line
+ * here — the same one-entry rule §10 applies to layouts and models.
+ *
+ * The key must equal the exporter's own `format` field; `ExportService` verifies that on every lookup
+ * rather than trusting it, because a mismatch would otherwise surface as a correctly-named file full of
+ * the wrong bytes.
+ */
+export function createExporters(_config: AppConfig): Record<string, Exporter> {
+  return { pptx: new PptxExporter() };
 }

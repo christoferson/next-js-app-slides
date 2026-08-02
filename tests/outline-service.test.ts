@@ -320,7 +320,9 @@ describe("OutlineService — editing", () => {
 
     const cleared = await h.services.outline.setLayoutOverride(h.userId, deck.id, 0, 1, null);
 
-    const slide = cleared.outline.sections[0]?.slides[1] as Record<string, unknown>;
+    // Through `unknown`: `OutlineSlide` and `Record<string, unknown>` don't overlap enough for a direct
+    // assertion, and the point of the cast is to inspect key *presence* rather than a declared field.
+    const slide = cleared.outline.sections[0]?.slides[1] as unknown as Record<string, unknown>;
     // Deleted, not set to `undefined`: an explicit `undefined` survives a JSON round-trip as a
     // present-but-null key in some serializers, which would read as an override of `null`.
     expect(Object.hasOwn(slide, "layoutOverride")).toBe(false);

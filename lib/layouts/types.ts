@@ -95,7 +95,12 @@ export interface PptxTarget {
 export interface PptxTextRun {
   text: string;
   options?: {
-    bullet?: boolean | { type: "number" };
+    /**
+     * `numberStartAt` is MANDATORY on a numbered run and is 1-based — pptxgenjs writes
+     * `startAt` on every paragraph regardless, defaulting it to 1, and a `startAt` restarts the
+     * OOXML sequence. Omitting it renders every item as "1." (probe: `verify-pptx-numbering.ts`).
+     */
+    bullet?: boolean | { type: "number"; numberStartAt: number };
     /** Set by the shared bullet helper, never by a layout — see §1.1/C5. */
     breakLine?: boolean;
     bold?: boolean;

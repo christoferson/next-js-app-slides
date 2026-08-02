@@ -17,7 +17,7 @@
 import type { ReactNode } from "react";
 import type { PptxTarget, RenderArgs, SlideLayout } from "@/lib/layouts/types";
 import {
-  AccentRule, accentRulePptx, isTemplated, paintPptx, paintPreview, type SlotPaint,
+  AccentRuleAbove, accentRuleAbovePptx, paintPptx, paintPreview, type SlotPaint,
 } from "@/lib/layouts/paint";
 import { SlideFrame } from "@/lib/layouts/preview";
 
@@ -27,7 +27,8 @@ const PAINT: readonly SlotPaint[] = [
   { slotKey: "presenter", face: "body", role: "caption", color: "secondary" },
 ];
 
-const RULE = { x: 8, y: 24, w: 12 } as const;
+/** Rule width only; x/y are derived from the live `title` zone (`ruleAboveZone`). */
+const RULE_W = 12;
 
 export const titleLayout: SlideLayout = {
   id: "title",
@@ -58,14 +59,14 @@ export const titleLayout: SlideLayout = {
 
   FallbackRenderer: (args: RenderArgs): ReactNode => (
     <SlideFrame tokens={args.tokens}>
-      <AccentRule tokens={args.tokens} {...RULE} />
+      <AccentRuleAbove args={args} slotKey="title" w={RULE_W} />
       {paintPreview(args, PAINT)}
     </SlideFrame>
   ),
 
   toPptx(target: PptxTarget, args: RenderArgs): void {
     // The brand background already carries the design language — don't paint over it.
-    if (!isTemplated(args)) accentRulePptx(target, args.tokens, RULE.x, RULE.y, RULE.w);
+    accentRuleAbovePptx(target, args, "title", RULE_W);
     paintPptx(target, args, PAINT);
   },
 };

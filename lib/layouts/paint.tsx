@@ -206,6 +206,67 @@ export function accentRulePptx(
   });
 }
 
+/**
+ * Where a rule that sits ABOVE a slot's zone goes, derived from the live zone.
+ *
+ * ## Why this is computed rather than written down
+ *
+ * `title`, `agenda`, `bullets` and `closing` each declared a literal `RULE = { x, y }` whose `y` had
+ * been picked to land just under a ONE-LINE title. Three of the four were inside their own title zone,
+ * so as soon as the title wrapped to the second line the accent bar rendered as a strike-through
+ * across it — visible in the step-13 fixture render (`out/render/fixture-token/page-02.png`), and
+ * caused by the ornament holding a private, stale copy of a number that lives in the zone.
+ *
+ * Zones are user-editable, so that copy could never stay correct: moving a title in the brand editor's
+ * zone table would silently re-break it. Anchoring to `zone.y` makes the two agree by construction,
+ * which is the §8 argument applied to ornaments instead of slot content.
+ *
+ * Above rather than below, because a rule under a variable-height text block either floats (short
+ * title) or is overrun (wrapped title) — the top edge is the only edge that does not move with the
+ * content. Returns `undefined` when the zone is absent so a layout renders without its ornament
+ * rather than throwing.
+ */
+export function ruleAboveZone(
+  args: RenderArgs, slotKey: string, w = 12,
+): { x: number; y: number; w: number } | undefined {
+  const zone = zoneFor(args.zones, slotKey);
+  if (!zone) return undefined;
+  // One rule height plus the same again as breathing room. `Math.max` keeps the bar on the slide for a
+  // zone flush to the top edge; it then abuts the text instead of being clipped, which is the better
+  // of the two bad outcomes for a zone the user placed at y:0.
+  return { x: zone.x, y: Math.max(0, zone.y - RULE_GAP), w };
+}
+
+/** Rule height (1.2%) + an equal gap. Named so the preview and the exporter cannot pick different ones. */
+const RULE_GAP = 2.4;
+
+/**
+ * The paired renderers for "an accent rule above this slot's zone" — the shape `title`, `agenda`,
+ * `bullets` and `closing` all wanted.
+ *
+ * Paired deliberately, in the same spirit as `paintPptx`/`paintPreview`: a layout that derived the
+ * geometry itself would have to call `ruleAboveZone` twice, and the §8 failure mode is precisely two
+ * call sites drifting apart. Here both consume one function, and the absent-zone and Templated cases
+ * are decided once rather than in four layouts.
+ */
+export function AccentRuleAbove(
+  { args, slotKey, w }: { args: RenderArgs; slotKey: string; w?: number },
+): ReactNode {
+  const rule = ruleAboveZone(args, slotKey, w);
+  // The preview shows ornaments in TokenStyled mode only, matching `accentRuleAbovePptx` — a preview
+  // that drew a rule the export omits is the §8 mismatch the user would report as an export bug.
+  if (!rule || isTemplated(args)) return null;
+  return <AccentRule tokens={args.tokens} {...rule} />;
+}
+
+export function accentRuleAbovePptx(
+  target: PptxTarget, args: RenderArgs, slotKey: string, w?: number,
+): void {
+  const rule = ruleAboveZone(args, slotKey, w);
+  if (!rule || isTemplated(args)) return;
+  accentRulePptx(target, args.tokens, rule.x, rule.y, rule.w);
+}
+
 /** A filled panel behind a zone — `two_column`, `stats`, and `quote` use it. */
 export function Panel(
   { color, x, y, w, h }: { color: string; x: number; y: number; w: number; h: number },

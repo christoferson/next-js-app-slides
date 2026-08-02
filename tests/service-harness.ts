@@ -22,6 +22,7 @@
  */
 
 import type { Container, Services } from "@/lib/container";
+import type { StudioFacade } from "@/lib/facade/studio-facade";
 import type { AppConfig } from "@/lib/config";
 import type { LLMPort, LlmRequest, LlmResponse, LlmTextDelta } from "@/lib/ports/llm-port";
 import type { Outline, VisualHint } from "@/lib/domain/deck";
@@ -116,9 +117,17 @@ export interface Clock {
 export interface Harness {
   container: Container;
   services: Services;
+  /** §2 step 14. Same instance routes get, over the same services as `services` above. */
+  facade: StudioFacade;
   userId: string;
   clock: Clock;
   llm: ScriptedLlm;
+  /**
+   * Headers to pass to a facade method. Empty, deliberately: the stub provider ignores headers (an
+   * `x-user-id` it honoured would be an authentication bypass — see `StubAuthProvider`), so a facade test
+   * scopes itself by building a container with a different `defaultUserId`, never by sending a header.
+   */
+  headers: Headers;
   /** Sequential, greppable ids: `id-1`, `id-2`. Order of allocation is therefore assertable. */
   ids: () => readonly string[];
 }
@@ -150,6 +159,12 @@ export function harness(config: Partial<AppConfig> = {}): Harness {
     {
       storageBackend: "memory",
       assetBackend: "memory",
+      // Pinned to match `Harness.userId`. Before step 14 nothing read this — the suites passed
+      // `harness().userId` straight to a service — so the stub provider's `defaultUserId` was free to
+      // differ from it. It no longer can: `StudioFacade` derives the userId from the provider, so a
+      // mismatch would make every facade write land in one partition and every direct-service read look
+      // in another, and the suites would disagree about who owns what.
+      defaultUserId: "user-a",
       defaultLlmModelId: DEFAULT_MODEL_ID,
       outlineModelId: DEFAULT_MODEL_ID,
       generationConcurrency: 1,
@@ -164,7 +179,11 @@ export function harness(config: Partial<AppConfig> = {}): Harness {
   return {
     container,
     services: container.services,
-    userId: "user-a",
+    facade: container.facade,
+    // Read back from the config rather than restated, so this cannot drift from what the stub provider
+    // actually returns — the drift the `defaultUserId` note above describes.
+    userId: container.config.defaultUserId,
+    headers: new Headers(),
     clock,
     llm,
     ids: () => minted,

@@ -1185,3 +1185,429 @@ renders specially is caught as a wasted vocabulary entry.
   `{ outcomes, ok, failed }`. `GenerationService` wires `emit` to SSE; it must not add a second
   try/catch layer that would swallow the per-slide reasons.
 - `createContainer(config, { llm: fake })` remains the no-AWS seam. Service tests use it.
+
+---
+
+## §2 step 12 — `lib/services/*` COMPLETE (2026-08-02)
+
+`npm run verify` green: ESLint clean, both typecheck projects clean, **939 tests / 26 files**
+(was 818/20 at end of step 11; +121 across 6 new suites).
+
+| Suite | Tests | Covers |
+|---|---|---|
+| `tests/brand-service.test.ts` | 27 | validate→compile→persist, asset lifecycle, `BrandInUse`, letterbox flagging |
+| `tests/deck-service.test.ts` | 23 | slide CRUD + reorder, budget enforcement on hand edits, brand swap, cascade |
+| `tests/layout-mapping-service.test.ts` | 15 | preview rows == `map()`, override validation, picker ordering |
+| `tests/outline-service.test.ts` | 17 | outline save/edit/reorder/override, the no-fallback error path |
+| `tests/generation-service.test.ts` | 22 | jobs + `persist` + identity — what storage adds over `pipeline.ts` |
+| `tests/export-service.test.ts` | 17 | format registry, the resolved `ExportRequest`, `exportFilename` |
+
+Six service files, 1,605 lines, plus `tests/service-harness.ts` (247).
+
+### The harness is the §6.3 proof, not a convenience
+
+Every suite but one builds its container through `createContainer(config, { llm: fake })` — the same
+composition root the routes will use, with the memory backend selected through the factory. That is §6.3
+("integration tests against the memory backend selected via factory wiring") satisfied by construction
+rather than by a separate exercise: a service test that hand-built its repositories would prove the
+services work and say nothing about whether the swap seam does.
+
+It also keeps the no-AWS seam honest. `llm` is a lazy `() => LLMPort` throughout, so all 939 tests run
+with no credentials and no Bedrock client ever constructed — `tests/container.test.ts`'s §1.3 check still
+holds with the whole service layer stacked on top of it.
+
+### `ExportService` is hand-wired, deliberately, and the shortcut is documented
+
+`Container` has no `exporters` field until step 13, so `tests/export-service.test.ts` constructs
+`new ExportService({ decks, brands, exporters })` with the harness's real deck/brand services and a
+recording fake exporter. Two rules keep that from becoming a lie:
+
+- every `ExportRequest` assertion reads the **real resolved value** from the harness's repositories
+  (compiled tokens from `themeFor`, zones from `LAYOUTS`, asset identity from `resolveRenderAssets`), so
+  the fake proves nothing on its own;
+- when step 13 adds `Container.exporters`, the file switches to `h.services.export` and every assertion
+  stands unchanged.
+
+This is not a §3 violation: the construction ban covers concrete *impls* (`tests/architecture.test.ts`
+matches `new (File|Memory|LocalDisk|Stub|Bedrock|Pptx)…`), and a service over injected ports is what the
+container itself builds. **Revisit at step 13** — the switch is the first task there.
+
+### Two real defects found by writing the tests
+
+1. **`regenerateSlide` told the model every slide was the deck's opener.** It passed `index: 0` with a
+   real `total`, so regenerating slide 2 of 3 built a prompt reading "Slide 1 of 3". The existing comment
+   claimed to be avoiding exactly this failure — it warned against `total: 1` making a slide "read as both
+   the opening and the close" — while committing it in the other coordinate. Both halves of "slide N of M"
+   are the deck's, not the call's; fixed to `index: slide.order`. Caught by asserting the literal
+   `"Slide 2 of 3"` appears in the prompt, which is the only assertion shape that could have caught it:
+   `index: 0` is a perfectly valid number and every type check passed.
+2. **`exportFilename` mangled composed characters.** It normalized to **NFKD**, which decomposes `デ` into
+   `テ` + a combining dakuten and `é` into `e` + a combining acute. A combining mark matches neither
+   `\p{L}` nor `\p{N}`, so the Unicode-aware *whitelist* replaced each one — the dakuten became a hyphen
+   **inside** the word (`日本語のデッキ` → `日本語のテ-ッキ`, changing how it reads), and the acute was
+   dropped outright (`Café Q3` → `Cafe-Q3`). Normalization and a codepoint whitelist were fighting each
+   other. Fixed to `.normalize("NFC")` with `\p{M}` in the class — composing keeps those as single
+   letters, and allowing marks keeps the scripts NFC cannot precompose (Devanagari, Thai) intact. Every
+   non-Latin-titled deck would otherwise have downloaded with a corrupted name.
+
+### `persist` inside the sequence is asserted by ORDER, not by presence
+
+SPEC §7.3 puts persistence *inside* the per-slide sequence — a `slide-done` the client renders before the
+write lands is a slide that vanishes on reload. The test wraps `decks.putSlide` and pushes to a shared log
+alongside the emitted events, then asserts the log **equals**
+`[persist:a, slide-done:a, persist:b, slide-done:b, …]`. Asserting merely that both happened would pass on
+the broken ordering.
+
+An adjacent row comes from the same wrapper: a `putSlide` that throws `ENOSPC` on the second slide yields
+exactly one `slide-error {reason:"internal", index:1}` whose message does not contain `ENOSPC` and does
+say "try regenerating", the other two slides persist, and `deck-done` reports `{ok:2, failed:0}` — the
+failed slide is absent from the counts, not tallied, matching §9's semantics for a slide that produced
+nothing.
+
+Self-caught before landing: the first draft of that test cast into `MemoryDeckRepository`'s private
+`slides` map and wrapped its assertion in `if (seen.some(...))`, so it could pass while asserting nothing.
+A conditional assertion is a test that reports success the moment the condition stops holding.
+
+### Registry-derived fixtures again, and one place they were load-bearing
+
+Following step 11's lesson, no suite hand-writes a layout-shaped response or a zone set.
+`plannedLayouts(h)` reads the layout ids from `mapping.map(OUTLINE)` rather than restating them, and
+`zonesOf(layoutId)` copies the layout's own `defaultZones`. The generation suite's 3-slide outline maps to
+`title` → `section_divider` → `closing`, which is not what a hand-written fixture would have guessed — and
+a template missing a required slot's zone fails `validateBrand`, so the export fixtures would have been
+asserting against *that* error instead of against backgrounds.
+
+### Decisions recorded because a future change will look reasonable
+
+- **`GenerationServiceDeps.slides` is the repository, not `DeckService`.** `persist` writes records whose
+  `flags`/`issue`/`order` the pipeline already decided; routing them through `DeckService.addSlide` would
+  re-run budget enforcement on content that was deliberately truncated *and flagged*, and reassign the
+  order it was given. Tested via the fallback row: a `bullets` slide with `flags` containing `fallback` and
+  `issue.reason === "repair-failed"` survives the write intact.
+- **`slidePlan` is keyed by slide id, not by `outcome.index`.** The regenerate path runs one slide, so an
+  index-keyed lookup would work only by coincidence of the two numbers agreeing.
+- **Generation clears the deck's slides up front.** An abort then leaves exactly the slides produced this
+  run (§9), instead of a mix of old and new that nothing distinguishes. The "outline has no slides" check
+  runs **before** `clearSlides`, asserted with a deck that keeps its existing 3 slides on refusal.
+- **A hand-added slide cannot be regenerated** — 409 `DeckNotReady` naming "edit it directly", zero model
+  calls, slide byte-identical. Without `source` there is no content to prompt from and no fallback
+  material; inventing either is the one thing §0.4 forbids.
+- **`ExportRequest` carries no repository, asset store, or `userId`** — asserted on
+  `Object.keys(request).sort()`, because an accidental passthrough type-checks against excess-property
+  rules only at the object literal, not at the assertion.
+- **Backgrounds share one object across layouts using the same asset**, asserted with `toBe` rather than
+  `toEqual`. §1.1/C3: pptxgenjs does not dedupe identical media (611 KB / 15 parts → 146 KB / 1 part in
+  the probe), so the exporter must build one master per *distinct* background, and object identity is how
+  it recognises the distinct set without comparing bytes. Step 13 depends on this.
+- **`buildRequest` is public and deep-equals what `export` passes.** §8's zone-fidelity check uses it as
+  its fixture builder; a second assembly path would mean the fidelity comparison was validating its own
+  reconstruction.
+- **Prototype keys are rejected at both registries.** `exporters["toString"]` under a bare index resolves
+  to a function that would then be *called* as an exporter, and both format and layout ids arrive from URL
+  segments. `Object.hasOwn` in both services; `["toString","constructor","__proto__","valueOf"]` tested
+  explicitly.
+- **A wiring mismatch fails loudly**: an exporter filed under `"ppt"` reporting `format: "pptx"` throws
+  `… — fix lib/container.ts` rather than handing the user a `.ppt` containing pptx bytes.
+- **`formats()` is sorted.** Object key order is insertion order and the container's insertion order is
+  not a UI decision; an unsorted menu reshuffles under the user's cursor between deployments.
+
+### Error-code semantics settled at this layer
+
+The wizard has three stages, so "which one" is the entire useful content of a precondition error. Each
+absence gets its own message: no briefing → "Fill in the briefing…", no outline → "Generate an outline…",
+no slides → "…Generate them before exporting." All are **409 `DeckNotReady`** (well-formed request, the
+fix is an action on the deck), distinct from **502 `GenerationFailed`** (upstream AI) and **400**
+`UnknownLayout` / `UnknownExportFormat` / `InvalidSlideContent` (bad input). `RETRYABLE` stays
+`{ModelThrottled(503), ModelUnavailable, ModelTimeout(504)}`, and a throttle from the outline path
+surfaces as itself, per step 11's carry-forward.
+
+### Testing notes worth keeping
+
+- **vitest does not typecheck.** All six suites were green under `vitest run` while `tsc` still had 4
+  errors (a widened `contentType: string` vs `AssetMimeType`, and a `TS2352` needing a cast through
+  `unknown`). `npm run verify` is the gate; a green test run is not.
+- `toMatchObject({ key: undefined })` is a **no-op** — it asserts nothing. Key *absence* needs
+  `Object.hasOwn(...)` / `toBeUndefined()`.
+- JS default parameters swallow an explicit `undefined`, so harness helpers take `null` for "omit this"
+  (`readyDeck(h, outline: Outline | null = OUTLINE, …)`).
+
+### Carry-forward for §2 step 13 (`lib/export/pptx-exporter.ts`)
+
+- **First task: add `exporters` to `Container`, wire `ExportService` through the factory, and switch
+  `tests/export-service.test.ts` to `h.services.export`.** The assertions do not change; if they do, the
+  hand-wiring was hiding something.
+- `ExportRequest.backgroundsByLayoutId` shares **one object** per distinct asset. Build one slide master
+  per distinct background, keyed on identity — not per layout (C3), and not by comparing bytes.
+- Truncation is ours (**C1**: `fit:'shrink'` never shrinks, verified on click), and every bullet run must
+  go through the one shared helper that always sets `breakLine` (**C5**). Both are already enforced
+  registry-wide by step 8; the exporter must not reintroduce a second path.
+- `exportFilename` is exported for exporters to share — two sanitizers is how one of them emits a `/`.
+- Zones must come from the same `resolveZones` the React renderer uses (§8), and the percent→inches math
+  from the one shared util. Step 8 recorded that the divergence risk here is structural.
+- The desktop-PowerPoint open-test (⚠️ VERIFY #1) is still **deferred, not waived**. Step 13's DoD box
+  stays unchecked until a desktop Office install is available; `npm run verify:render:all` plus
+  LibreOffice / PowerPoint-on-the-web is what can be automated here.
+
+---
+
+## §2 step 13 — `lib/export/pptx-exporter.ts` COMPLETE (2026-08-02)
+
+`npm run verify` green: **27 test files, 960 tests**, lint and both typecheck projects clean.
+`npm run verify:pptx:probes` green, now including `verify-pptx-paragraphs.ts` and
+`verify-pptx-numbering.ts`.
+
+The exporter is the ONE file in the app importing pptxgenjs. Everything above it talks to `PptxTarget`,
+which is what keeps `lib/layouts` importable from the brand editor and §5's lint free of per-file
+exemptions.
+
+### The fixture deck is the deliverable, and it found three things the suite could not
+
+CLAUDE.md §2 step 13 asks for "a fixture deck covering every seed layout, templated AND token-styled."
+`scripts/export-fixture-deck.ts` (`npm run verify:pptx:fixture`) writes two decks —
+`out/FIXTURE-TOKEN.pptx` and `out/FIXTURE-TEMPLATED.pptx`, 8 slides each, one per registry entry in
+registry order — through the **real** path: `createContainer()` → `ExportService` → `PptxExporter` →
+each layout's own `toPptx`.
+
+That last point is why it exists separately from `verify-pptx-opentest.ts`. The opentest script is a
+§1.1 *spike*: it hand-builds pptxgenjs calls with its own copies of the zone and letterbox math, so it
+proves the library works and says nothing about whether we drive it correctly. Rendering the real path
+through LibreOffice (`npm run verify:pptx:fixture:render`) immediately surfaced **three defects that
+960 passing tests were green through**:
+
+| # | Defect | Why every existing test missed it |
+|---|---|---|
+| 1 | A numbered list rendered `1. 1. 1. 1. 1. 1.` | pptxgenjs writes `<a:buAutoNum startAt="N"/>` on EVERY numbered paragraph and defaults N to 1; in OOXML a `startAt` **restarts** the sequence. The C5 assertions count paragraphs and bullets — all correct here. The one test whose NAME covered it (`"carries numbering on every item when asked"`) asserted `toEqual({type:'number'})` per run, i.e. it asserted the bug. |
+| 2 | The accent rule **struck through** the title on `agenda`, `bullets`, `closing` | Each layout held a literal `RULE = {x, y}` whose `y` was picked for a ONE-line title. Three of four were *inside* their own title zone. No test asserted ornament geometry at all. |
+| 3 | List items at exactly `itemMaxChars` wrap to two lines in Verdana + CJK | Not a new defect — this is `capacity.ts`'s already-documented `AVG_ADVANCE_EM = 0.5` limitation (CJK is ~1em/glyph, Verdana is wide). Recorded because the fixture is the first place it is *visible*. See below. |
+
+Both real defects are now asserted against the serialized XML in `tests/pptx-exporter.test.ts` →
+*"regressions from the step-13 fixture render"*, so the eye was needed once rather than every time.
+
+### Defect 1 — numbering, and why the type now forbids the mistake
+
+Probed in both directions before fixing (`scripts/verify-pptx-numbering.ts`, run in
+`verify:pptx:probes`):
+
+```
+Q1 bullet:{type:'number'}          startAt = [1, 1, 1]   ❌ defect reproduced
+Q2 + numberStartAt: i+1            startAt = [1, 2, 3]   ✅ fix confirmed
+Q3 bullet:true                     startAt = []          ✅ glyph bullets never affected
+```
+
+`bulletRuns` now stamps `numberStartAt: index + 1`, alongside the `breakLine` it already stamped for
+C5 — same helper, same reason. Two details worth keeping:
+
+- **`PptxTextRun`'s type makes `numberStartAt` REQUIRED** on a numbered bullet
+  (`{ type: "number"; numberStartAt: number }`). A future layout cannot construct a numbered run
+  without it, so the compiler now enforces what the probe discovered.
+- **The empty-item filter runs BEFORE numbering.** Otherwise dropping a blank item 2 would emit
+  1, 3, 4 — a list that looks like it lost an entry, which is worse than the blank it avoided. Asserted.
+
+### Defect 2 — the ornament held a stale copy of a number that lives in the zone
+
+The fix is not a better `y`. Zones are **user-editable**, so any literal would drift again the moment
+someone moved a title in the brand editor's zone table. `ruleAboveZone(args, slotKey, w)` in
+`paint.tsx` derives the rule from the live resolved zone, and the paired `AccentRuleAbove` /
+`accentRuleAbovePptx` are what the four layouts call — one derivation, two renderers, exactly the
+`paintPptx`/`paintPreview` argument applied to ornaments instead of slot content.
+
+Above rather than below, because a rule *under* a variable-height text block either floats (short
+title) or is overrun (wrapped title); the top edge is the only edge that does not move with the
+content. Each layout now declares only `RULE_W`.
+
+The regression test identifies the rule by **shape** (short, narrow, non-zero) and asserts its
+`y + cy ≤ titleZone.y` — deliberately not by coordinates, since hardcoding them here would restore the
+duplicated constant that caused the defect. One trap found while writing it: every slide part opens
+with the `<p:spTree>`'s own `<a:xfrm>` at `0,0,0,0`, which satisfies any "smaller than" filter and made
+a templated slide appear to still carry a rule. Hence `isRuleShaped`'s positive-size check.
+
+### Defect 3 — recorded, not fixed, and why
+
+The fixture fills every list to `maxItems` and pads each item to `itemMaxChars`, deliberately: a budget
+is only a real constraint at the count and length the layout claims to support, and C1 means nothing
+shrinks to rescue an overrun. At that worst case, `bullets`/`agenda` items wrap to two lines in Verdana
+with CJK — so 6 items overflow their zone.
+
+This is the `AVG_ADVANCE_EM` caveat `capacity.ts` already carries in its header, now observed rather
+than predicted: 0.5em/char is a Latin mean, CJK is ~1em, and Verdana is wider than the faces the probe
+measured. It is **not** an exporter defect and the fix is not in step 13 — the honest options are a
+per-face advance (needs the deferred desktop open-test for real metrics) or lower `itemMaxChars` for
+list slots. Left as a flagged ⚠️ VERIFY rather than silently tightening budgets on one renderer's
+evidence.
+
+### What the LibreOffice render DID confirm
+
+- **Fonts are not substituted**: Georgia renders as a serif and Verdana as a distinct sans on every
+  slide, and CJK glyphs are intact. This is LibreOffice, not desktop Office — see ⚠️ VERIFY #1.
+- **§1.1/C3 holds visibly**: the templated deck is 390 KB against the token deck's 126 KB for 8
+  identical-byte backgrounds, i.e. media is genuinely not deduped, exactly as the probe measured.
+- **Templated mode suppresses ornaments AND the logo** while painting slot content identically — the
+  brand background carries its own logo, and stamping a second is the off-brand-by-accident outcome
+  templates exist to prevent.
+- `quote`'s vertical rule and `stats`' card panels sit clear of their text; `stats`' cards are placed by
+  its own `cardColumns`, the same function the test asserts against.
+
+### Five OOXML package facts, probed rather than assumed
+
+Each was measured with a throwaway probe while writing the suite. **Two of them would have produced
+silently-vacuous tests**, which is the §0.1 failure mode in its purest form:
+
+1. `defineSlideMaster` lands in **`ppt/slideLayouts/slideLayoutN.xml`** (named by the passed title).
+   There is exactly ONE `slideMaster1.xml` no matter how many masters are defined — so the obvious
+   `slideMasters/` count reads `1` forever and the C3 assertion would have passed while asserting
+   nothing. Hence `Package.layoutNames` + `brandMasters()`.
+2. JSZip lists **directory entries**, so `ppt/media/` itself counted as an image — off by one in the
+   direction that *hides* a duplicate. Hence `.filter((n) => !zip.files[n]!.dir)`.
+3. pptxgenjs writes a notes part for **every** slide, empty ones included, so a count is meaningless;
+   the TEXT is the assertion (and the trailing slide-number run must be stripped).
+4. `<p:pic>` geometry is **pretty-printed across lines** while text shapes are adjacent — a regex
+   requiring adjacency silently returned zero matches for every image.
+5. `company` → `docProps/app.xml`; `author` → `core.xml` as `dc:creator`. Probing this also revealed the
+   exporter never set `author`, so **pptxgenjs credited itself**; now asserted
+   (`expect(pkg.core).not.toContain("PptxGenJS")`).
+
+### Decisions worth recording
+
+- **C5's export-time backstop is a boundary check, not a re-count.** `assertBulletParagraphs` asserts
+  *of the runs in this text box carrying a bullet, all carry `breakLine`* — the exact condition C5 turns
+  on. The original plan (compare against `paintPptx`'s `listParagraphs`) cannot work: `toPptx` returns
+  `void`, so every layout discards that value, and deriving the count from `slots` would be wrong for
+  `stats`, whose list slots render as card text rather than bullets. The serialized-paragraph proof
+  lives in the suite instead.
+- **A non-16:9 background forfeits dedup rather than distorting.** A master background always stretches
+  (`<a:stretch><a:fillRect/>`, no `srcRect`), so `masterFor` returns `undefined` for such an asset and it
+  is placed at slide level via `placeBackground(..., "contain")` — pillarboxed against the token
+  background, which is the documented §8 choice.
+- **A background with no bytes is skipped (C4).** pptxgenjs validates nothing and throws at `write()`,
+  i.e. the whole export fails at the very end. Degrading that one slide to token-styled yields a
+  complete slide and matches `resolveRenderAssets`' own decision.
+- **`toBytes` narrows by `instanceof` rather than casting**, so a future pptxgenjs returning something
+  other than a Buffer fails loudly here instead of producing a corrupt download.
+- **`LOGO_BOX` is exported** precisely so step 16's preview consumes it rather than hand-copying the
+  numbers — §8 applied to the logo. Its width derives from the image's intrinsic aspect, never fixed.
+- **`tsconfig.scripts.json` gained `paths` and `jsx`.** A script driving the real exporter transitively
+  imports `lib/**` (whose modules use `@/…`) and the layout registry (whose entries are `.tsx`, because
+  §4 co-locates each layout's `FallbackRenderer` with its `toPptx`). No `baseUrl` — deprecated in TS 6.0
+  and removed in 7.0; `paths` resolves relative to the config file without it.
+
+### ⚠️ VERIFY — step 13's additions
+
+5. **Desktop PowerPoint open-test still DEFERRED, not waived (⚠️ VERIFY #1).** The fixture decks exist
+   and render correctly under LibreOffice 26.2.5.2, but no desktop Office install is available here.
+   Bytes cannot prove the absence of font substitution, so CLAUDE.md §13's "opened in real PowerPoint"
+   box stays **unchecked**. To close it: `npm run verify:pptx:fixture`, open both files, confirm heading
+   text is Georgia and body text is Verdana on every slide (each slide's title names its layout, so a
+   substitution is traceable to a specific one).
+6. **`AVG_ADVANCE_EM = 0.5` overestimates capacity for Verdana and badly for CJK** — now *observed* in
+   the fixture render (defect 3 above), not merely predicted. Budgets have headroom against the estimate
+   and nothing branches on it at render time, so this cannot produce nondeterministic output. Closing it
+   needs per-face metrics from the deferred desktop open-test.
+
+### Carry-forward for §2 step 14 (`lib/facade/studio-facade.ts`)
+
+- Every port is now wired in `lib/container.ts`; the facade is assembled from exactly
+  `Container.services`. Nothing below it needs to change.
+- `exporters` is keyed by `Exporter.format` and `ExportService.formats()` returns it **sorted** — that
+  ordering is the download menu's, so it must not depend on the container's insertion order.
+- The route layer must set `Content-Disposition` from `ExportResult.filename` (already sanitized by the
+  one shared `exportFilename`) and `Content-Type` from `PPTX_CONTENT_TYPE`.
+- When the preview lands (step 16), it must consume `resolveZones`, `zoneToInches`, `LOGO_BOX`, and
+  `ruleAboveZone` — the four things the export path derives its geometry from. §8 divergence is
+  structural, and every one of these exists so there is nothing to hand-copy.
+
+---
+
+## §2 step 14 — `lib/facade/studio-facade.ts` (2026-08-02)
+
+`npm run verify` green: **28 test files, 980 tests**, lint + both typecheck projects clean.
+
+### What the facade adds over the services
+
+Most of its 34 methods are one-line delegations, and that is the point — they exist so `app/**` has a
+path that is not `lib/services/**` (lint-enforced, §5). Three things are genuinely this layer's:
+
+1. **Authentication.** Every method takes `Headers` and derives its own `userId`; `Unauthorized` (401) is
+   raised here because the port returns `null` and the *meaning* of absence is the caller's call. The
+   security property is structural rather than reviewed: there is **no `userId` parameter to get wrong**,
+   so a new route cannot introduce either an unauthenticated read or — the far worse case — a
+   client-supplied `userId` writing into another user's partition.
+2. **Multi-service orchestration.** Four methods: `createDeck` (brand existence check), `switchBrand`
+   (validate + re-resolve templates), `workspace` (deck + slides + brand + tokens + templates in ONE
+   call, so all five describe one revision), and the private `templatesFor`.
+3. **The streaming seam.** `generateDeck` takes an `emit` callback, not a stream. The facade owns *which*
+   events occur; the route owns SSE framing. That split is why the §9 matrix needs no HTTP server.
+
+### Two gaps step 14 exposed in lower layers
+
+- **`/api/assets/:id` had nothing to call.** Both asset stores return that URL from `resolveUrl`, but no
+  service exposed `getStream`, and the facade may not touch a port directly (§5). Added
+  `BrandService.getAssetStream` — on `BrandService` because it already owns the `AssetStore` port and
+  assets *are* brand assets. It deliberately does NOT route through `resolveOrSkip`: a **serving** request
+  for missing bytes is a 404, where a *render* path is right to degrade silently to token-styled.
+  The serving URL carries **no userId** (deliberately — so it cannot be used to probe another partition),
+  which makes the facade's principal the only scoping there is. Another user's id yields
+  `AssetNotFound` **404, not 403**: a distinguishable "exists but forbidden" turns the URL space into an
+  id oracle.
+- **`tests/service-harness.ts` had a latent userId mismatch.** It declared `userId: "user-a"` while the
+  stub provider returned `defaultUserId` (`"local-user"`). Nothing read it before, because the suites
+  passed `harness().userId` straight to a service. The facade derives its userId from the *provider*, so
+  the mismatch would have made every facade write land in one partition and every direct-service read
+  look in another. Fixed by pinning `defaultUserId: "user-a"` in the harness config and reading
+  `Harness.userId` back from `container.config`, so the two cannot drift again.
+
+### Mutation-tested, not just green
+
+Step 13's lesson was that passing tests prove nothing until you watch them fail. Each of these was
+reintroduced into the facade and the suite re-run:
+
+| Mutation | Caught by |
+|---|---|
+| `createDeck`'s brand pre-check removed | 2 tests — including the cross-user "another user's brand" case |
+| `userId()` trusts an `x-user-id` header | "ignores a header claiming a different user" |
+| `templatesFor` stops narrowing to used layouts | "resolves templates for exactly the layouts the deck uses" |
+
+All three restored; suite green. The header-trust mutation is the one worth naming — it is the
+authorization hole the whole no-`userId`-parameter design exists to foreclose, and it is now covered by a
+test rather than by a comment.
+
+### Decisions
+
+- **`getFacade()` in `lib/container.ts`** is what routes import. Offering it instead of making routes
+  reach through `getContainer().services` means §5's "routes call the facade, not services" holds because
+  there is no path to a service, not because someone remembers the rule.
+- **The facade is built from the named `services` object**, not inline, so routes and tests share one set
+  of service instances — otherwise `container.services` would hand tests a second, independently
+  constructed graph while routes wrote through the first. Asserted directly.
+- **Eager, like the services**: it holds references and constructs nothing, so building it cannot resolve
+  credentials (§1.3 unaffected). Asserted stateless (`Object.keys(facade) === ["deps"]`) — a caching
+  facade would defeat `workspace`'s single-revision guarantee.
+- **A structural test reads the source** and asserts no public method takes a `userId:` parameter. A
+  signature is not introspectable at runtime, and this is the property that must not regress.
+- **A coverage test lists all 34 methods** against SPEC §3's endpoint table, so a missing use-case
+  surfaces now rather than at step 15, when the tempting fix is to reach past the facade.
+
+### Two test-fixture corrections worth recording
+
+- **Layout ids are not `VisualHint`s.** `outlineOf(["bullets"])` typechecked as `string` in vitest but
+  failed `npm run verify` — the hint vocabulary is `opening | agenda | section | list | comparison |
+  quote | …`. Another instance of the standing note: **vitest does not typecheck; `npm run verify` is the
+  gate.**
+- **Scripting canned responses per *hint* is wrong.** The mapping chain's Positional rule gives a deck's
+  first slide `title` whatever its hint, so a `bullets`-shaped response fails validation and lands as a
+  *fallback* slide — which reads as a facade bug in the `ok`/`failed` counts. The helper now reads planned
+  layouts from `mapping.map(outline)` (same approach as `plannedLayouts` in the generation suite) and
+  asserts `failed === 0`, so a downstream read test cannot silently exercise fallback content.
+
+### Carry-forward for §2 step 15 (`app/api/*`)
+
+- **Routes get `getFacade()` and nothing else.** No `userId` is ever passed in or read from a header.
+- **Errors**: `AppError.status` and `toReadable()` already carry the request-level mapping; the in-stream
+  equivalent is `toFatalEvent`. Both required by §13 ("readable request-level AND in-stream").
+- **Export route**: `Content-Disposition` from `ExportResult.filename` (sanitized by the one shared
+  `exportFilename`), `Content-Type` from `ExportResult.contentType`.
+- **SSE route**: encode `StreamEvent`s from the `emit` callback `generateDeck` already takes; the facade
+  emits, the route frames. Client abort maps to the `signal` option — the §9 abort row.
+- **Asset route**: `facade.serveAsset(headers, assetId)` returns a `ReadableAsset` whose `body` is a WEB
+  `ReadableStream`, returnable directly from a Next route handler.
+- Still open and unchanged by this step: ⚠️ VERIFY #5 (desktop PowerPoint open-test — deferred, not
+  waived) and #6 (`AVG_ADVANCE_EM` per-face metrics). Docker smoke remains skipped by user decision.
