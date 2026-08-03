@@ -82,27 +82,70 @@ export const outlineSlideSchema: z.ZodType<OutlineSlide> = z.object({
   question, message, evidence, visualHint,
 })) as unknown as z.ZodType<OutlineSlide>;
 
-export const outlineSectionSchema: z.ZodType<OutlineSection> = z.object({
-  // A blank heading is allowed: `PositionalRule` already declines to divide an unheaded section, so
-  // an untitled section renders correctly. Requiring one would fail an otherwise fine outline.
-  heading: z.string().max(OUTLINE_LIMITS.maxHeadingChars).transform((s) => s.trim()).catch(""),
-  slides: z.array(outlineSlideSchema).max(OUTLINE_LIMITS.maxSlidesPerSection),
-}) as unknown as z.ZodType<OutlineSection>;
+/**
+ * The user-edited counterpart of `outlineSlideSchema`, and the ONE difference is `layoutOverride`.
+ *
+ * The model-facing schema strips that field (see its note: a model that invented it would silently
+ * outrank the whole mapping chain). A person editing their own outline is exactly who is *allowed* to pin
+ * a layout — SPEC §7.2's `UserOverrideRule` is that pin — so the save path must preserve it. Whether the
+ * id names a real layout is `OutlineService.save`'s check, from the registry, because a mapping-aware
+ * answer ("that layout isn't available") is more useful than a schema rejection and the registry is not
+ * importable here.
+ *
+ * Two schemas rather than one flag on the first: a boolean parameter would put "may the caller pin a
+ * layout" at a call site, which is where it gets passed wrongly. As separate exports, the model pipeline
+ * cannot reach the permissive one by accident.
+ */
+const editedSlideSchema: z.ZodType<OutlineSlide> = z.object({
+  question: nonEmpty(OUTLINE_LIMITS.maxQuestionChars, "question"),
+  message: nonEmpty(OUTLINE_LIMITS.maxMessageChars, "message"),
+  evidence: evidenceSchema,
+  visualHint: visualHintSchema,
+  layoutOverride: z.string().min(1, { error: "layoutOverride must not be empty" }).optional(),
+}).transform(({ question, message, evidence, visualHint, layoutOverride }) => ({
+  question, message, evidence, visualHint,
+  ...(layoutOverride !== undefined ? { layoutOverride } : {}),
+})) as unknown as z.ZodType<OutlineSlide>;
 
-export const outlineSchema: z.ZodType<Outline> = z.object({
-  sections: z.array(outlineSectionSchema)
-    .min(1, { error: "at least one section is required" })
-    .max(OUTLINE_LIMITS.maxSections),
-})
-  // Empty sections are dropped here rather than rejected: `mapOutline` already skips them, and one
-  // stray empty section is not worth a repair call.
-  .transform((outline) => ({ sections: outline.sections.filter((s) => s.slides.length > 0) }))
-  .refine((outline) => outline.sections.length > 0, {
-    error: "the outline contains no slides",
+/**
+ * Section and document schemas, built over whichever slide schema applies.
+ *
+ * A factory rather than two hand-written copies: the section and document rules (blank headings allowed,
+ * empty sections dropped, the total-slides cap) are identical for both paths, and a second copy is how
+ * the user-edit path ends up with a different slide cap than the generated one — a divergence nothing
+ * would notice until a large outline saved fine and then failed to regenerate.
+ */
+function sectionSchemaOver(slide: z.ZodType<OutlineSlide>): z.ZodType<OutlineSection> {
+  return z.object({
+    // A blank heading is allowed: `PositionalRule` already declines to divide an unheaded section, so
+    // an untitled section renders correctly. Requiring one would fail an otherwise fine outline.
+    heading: z.string().max(OUTLINE_LIMITS.maxHeadingChars).transform((s) => s.trim()).catch(""),
+    slides: z.array(slide).max(OUTLINE_LIMITS.maxSlidesPerSection),
+  }) as unknown as z.ZodType<OutlineSection>;
+}
+
+function outlineSchemaOver(section: z.ZodType<OutlineSection>): z.ZodType<Outline> {
+  return z.object({
+    sections: z.array(section)
+      .min(1, { error: "at least one section is required" })
+      .max(OUTLINE_LIMITS.maxSections),
   })
-  .refine((outline) => countSlides(outline) <= OUTLINE_LIMITS.maxSlidesTotal, {
-    error: `an outline may contain at most ${OUTLINE_LIMITS.maxSlidesTotal} slides`,
-  }) as unknown as z.ZodType<Outline>;
+    // Empty sections are dropped here rather than rejected: `mapOutline` already skips them, and one
+    // stray empty section is not worth a repair call.
+    .transform((outline) => ({ sections: outline.sections.filter((s) => s.slides.length > 0) }))
+    .refine((outline) => outline.sections.length > 0, {
+      error: "the outline contains no slides",
+    })
+    .refine((outline) => countSlides(outline) <= OUTLINE_LIMITS.maxSlidesTotal, {
+      error: `an outline may contain at most ${OUTLINE_LIMITS.maxSlidesTotal} slides`,
+    }) as unknown as z.ZodType<Outline>;
+}
+
+export const outlineSectionSchema: z.ZodType<OutlineSection> = sectionSchemaOver(outlineSlideSchema);
+export const outlineSchema: z.ZodType<Outline> = outlineSchemaOver(outlineSectionSchema);
+
+/** The save path's document schema — same rules, plus `layoutOverride`. See `editedSlideSchema`. */
+export const editedOutlineSchema: z.ZodType<Outline> = outlineSchemaOver(sectionSchemaOver(editedSlideSchema));
 
 export const countSlides = (outline: Outline): number =>
   outline.sections.reduce((total, section) => total + section.slides.length, 0);
@@ -117,16 +160,32 @@ export type OutlineParse =
   | { ok: false; issues: OutlineIssue[] };
 
 export function parseOutline(input: unknown): OutlineParse {
-  const parsed = outlineSchema.safeParse(input);
-  if (parsed.success) return { ok: true, outline: parsed.data };
-  return {
-    ok: false,
-    issues: parsed.error.issues.map((issue) => ({
-      path: issue.path.map(String).join("."),
-      message: issue.message,
-    })),
-  };
+  return interpret(outlineSchema.safeParse(input));
 }
+
+/**
+ * Parse an outline the USER submitted (`PATCH /api/decks/:id/outline`).
+ *
+ * Separate from `parseOutline` because of `layoutOverride` — see `editedSlideSchema`. It exists at all
+ * because `OutlineService.save` takes a typed `Outline` and, before this, validated only the overrides:
+ * the document itself arrived from a request body, so a route that cast an `unknown` payload to `Outline`
+ * would persist whatever JSON was sent, and the next generation run would then map over slides with no
+ * `message` and no `visualHint`. Parsing at the write is the only place that can be caught.
+ */
+export function parseEditedOutline(input: unknown): OutlineParse {
+  return interpret(editedOutlineSchema.safeParse(input));
+}
+
+const interpret = (parsed: z.ZodSafeParseResult<Outline>): OutlineParse =>
+  parsed.success
+    ? { ok: true, outline: parsed.data }
+    : {
+      ok: false,
+      issues: parsed.error.issues.map((issue) => ({
+        path: issue.path.map(String).join("."),
+        message: issue.message,
+      })),
+    };
 
 /** One regenerated section (SPEC §7.1's `sectionIndex` path). */
 export function parseOutlineSection(input: unknown): { ok: true; section: OutlineSection } | { ok: false; issues: OutlineIssue[] } {

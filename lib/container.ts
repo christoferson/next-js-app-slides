@@ -176,6 +176,21 @@ export function getFacade(): StudioFacade {
   return getContainer().facade;
 }
 
+/**
+ * The config, for the routes that need a knob rather than a use-case.
+ *
+ * Two do: the deck/briefing schemas are parameterized by `maxSourceTextChars` and the upload route
+ * enforces `maxAssetBytes`. Both are HTTP-edge limits — a service cannot apply them, because by the time
+ * a service sees a briefing the megabyte has already been parsed and the bytes already buffered.
+ *
+ * Offered as its own accessor for `getFacade`'s reason: a route that reached `getContainer().config`
+ * would have `.services` in scope, and §5's rule would then be a habit again rather than the absence of
+ * a path. This returns config and nothing else.
+ */
+export function getConfig(): AppConfig {
+  return getContainer().config;
+}
+
 /** Test-only escape hatch, so one test's container can't leak into the next. */
 export function resetContainer(): void {
   singleton = undefined;

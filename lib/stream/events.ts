@@ -13,6 +13,8 @@
  *    variant here is backward-compatible by construction.
  */
 
+import { toReadable } from "@/lib/errors/errors";
+
 /** Quality flags surfaced as amber badges (§12) — never suppressed. */
 export type QualityFlag =
   | "trimmed"           // text exceeded the slot budget and was truncated at a word boundary (C1)
@@ -116,4 +118,21 @@ export function isStreamEvent(value: unknown): value is StreamEvent {
  */
 export function toSseFrame(event: StreamEvent): string {
   return `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+/**
+ * Turn a thrown value into the one `fatal` frame a stream may end with (§13: readable in-stream).
+ *
+ * **Here rather than in a service**, which is where it used to live. §5 forbids `app/**` from importing
+ * `lib/services/**`, and the streaming ROUTE is a caller: a stream that dies before the facade is even
+ * reached (an unauthenticated request, a malformed body) still owes the client a readable terminal frame,
+ * and the route is the only layer that knows that happened. Both callers now share one implementation —
+ * `lib/services/generation-service.ts` re-exports this — so the two cannot drift into telling the client
+ * different stories about the same failure.
+ *
+ * `toReadable` is the single place any value becomes user-safe text, so a raw SDK message cannot arrive
+ * here by another path.
+ */
+export function toFatalEvent(err: unknown, at: number): StreamEvent {
+  return { type: "fatal", at, message: toReadable(err).message };
 }

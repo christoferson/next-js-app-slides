@@ -28,6 +28,8 @@
 
 import type { AssetStore, BrandRepository, DeckRepository } from "@/lib/ports";
 import type { AssetMeta, ReadableAsset, ResolvedAsset } from "@/lib/domain/asset";
+import { checkAssetBytes } from "@/lib/domain/asset-bytes";
+import { imageSize } from "@/lib/layouts/background";
 import type { BrandDefinition, BrandSummary, DesignTokens, LayoutTemplate } from "@/lib/brand/types";
 import {
   type BrandInput, type LayoutLookup, describeIssues, validateBrand, validateBrandInput,
@@ -47,6 +49,19 @@ export interface BrandServiceDeps {
   now: () => number;
   newId: () => string;
 }
+
+/**
+ * What an upload may ASSERT about itself, as opposed to what is stored.
+ *
+ * `contentType` is a plain `string` and optional, not `AssetMimeType`. That is the type system carrying
+ * the security decision: a browser derives the multipart content type from a filename extension, so it is
+ * a claim to be checked (`checkAssetBytes`), and typing it as the narrow union would mean some caller had
+ * already been trusted to narrow it — which is precisely the step that must not happen outside this
+ * service. The stored type is this method's return path, never its input.
+ *
+ * `width`/`height` are likewise a fallback, used only for formats whose bytes carry no dimensions.
+ */
+export type AssetUploadMeta = Omit<AssetMeta, "createdAt" | "contentType"> & { contentType?: string };
 
 /** Zones + background, resolved for one layout. What the preview and the exporter both consume (§8). */
 export interface ResolvedTemplate {
@@ -215,12 +230,33 @@ export class BrandService {
    *
    * `layoutId` is checked against the registry BEFORE the bytes are stored — otherwise a typo leaves an
    * orphan asset that nothing will ever clean up.
+   *
+   * ## Two fields are taken from the BYTES, not from `meta`
+   *
+   * `contentType` and `width`/`height` are re-derived here, and that is a security boundary rather than
+   * tidiness. An upload's declared content type comes from a filename extension, and its dimensions from
+   * whatever the client chose to send:
+   *
+   *   - `checkAssetBytes` decides the stored content type from the file's own signature and rejects
+   *     anything outside SPEC §5's allowlist or any SVG carrying active content. `/api/assets/:id` serves
+   *     these bytes under the stored type, so a claim honoured here becomes a document the browser
+   *     executes in this origin. Placing the check in the service — not the route — is what makes
+   *     `lib/domain/asset.ts`'s "SVG is sanitized before it is ever stored" true of *every* caller,
+   *     including the fixture script.
+   *   - Dimensions drive the letterbox decision (`placeBackground`) and therefore the amber badge (§12).
+   *     A client claiming 1920×1080 for a 4:3 image would silently get a stretched export with no
+   *     warning. `imageSize` is preferred when the bytes carry readable dimensions, and the declared
+   *     values are the fallback for formats where they do not (SVG, which has no intrinsic pixel size —
+   *     the exporter already treats a dimensionless asset as full-bleed).
+   *
+   * The size limit is NOT here: `MAX_ASSET_MB` is config, and it must be applied at the HTTP edge before
+   * the body is buffered, which no service can do (see `lib/domain/asset-bytes.ts`'s header).
    */
   async addAsset(
     userId: string,
     brandId: string,
     data: Uint8Array,
-    meta: Omit<AssetMeta, "createdAt">,
+    meta: AssetUploadMeta,
   ): Promise<{ assetId: string; brand: BrandDefinition }> {
     const brand = await this.get(userId, brandId);
 
@@ -233,8 +269,13 @@ export class BrandService {
       }
     }
 
+    const contentType = checkAssetBytes(data, meta.contentType);
+    const intrinsic = imageSize(data);
+
     const { assetId } = await this.deps.assets.put(userId, meta.kind, data, {
       ...meta,
+      contentType,
+      ...(intrinsic ?? {}),
       createdAt: new Date(this.deps.now()).toISOString(),
     });
 

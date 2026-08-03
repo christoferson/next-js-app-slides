@@ -32,10 +32,10 @@
 import type { Briefing, Outline, OutlineSection, OutlineSlide } from "@/lib/domain/deck";
 import type { BrandTone } from "@/lib/brand/types";
 import type { LLMPort } from "@/lib/ports/llm-port";
-import { DeckNotReady, InvalidBrandConfig } from "@/lib/errors/errors";
+import { DeckNotReady, InvalidBrandConfig, InvalidRequest } from "@/lib/errors/errors";
 import { clampTemperature, requireModel } from "@/lib/models/registry";
 import {
-  type OutlineAdvisory, outlineAdvisories,
+  type OutlineAdvisory, describeOutlineIssues, outlineAdvisories, parseEditedOutline,
 } from "@/lib/generation/outline-schema";
 import { generateOutline, generateOutlineSection } from "@/lib/generation/outline-pipeline";
 import type { BrandService } from "@/lib/services/brand-service";
@@ -132,13 +132,33 @@ export class OutlineService {
   /**
    * Save a user-edited outline (SPEC §7.1: edit a message, reorder, set a `layoutOverride`).
    *
-   * Every `layoutOverride` is validated here — the mapping chain deliberately *ignores* an override
-   * naming an unknown layout (a layout can be removed between save and generate, and neither crashing
-   * nor rendering an unknown id is acceptable), which means a typo would otherwise be silently dropped
-   * with no explanation. Checking at the write is the only place it can be reported.
+   * ## `unknown`, not `Outline`
+   *
+   * This document arrives from a request body, so a typed parameter here would be a claim the route had
+   * validated it — and no route can: `parseEditedOutline` is the authority, and putting a copy of the
+   * outline's shape in `lib/http` is §4's parallel table in its most damaging form (the client is told a
+   * layout pin was saved that the mapping chain will ignore). Taking `unknown` and parsing HERE means
+   * every caller — route, facade, script, a future importer — gets the same guarantee for free.
+   *
+   * Rejected with `InvalidRequest`'s field-level issues rather than `GenerationFailed`: this is a person's
+   * edit, and the editor needs to know which slide is wrong. That is the same reasoning
+   * `InvalidSlideContent` records for the slide editor — a model's malformed output is repaired, a
+   * person's is reported.
+   *
+   * ## Why every `layoutOverride` is checked against the registry
+   *
+   * The mapping chain deliberately *ignores* an override naming an unknown layout (a layout can be removed
+   * between save and generate, and neither crashing nor rendering an unknown id is acceptable), which
+   * means a typo would otherwise be silently dropped with no explanation. Checking at the write is the
+   * only place it can be reported.
    */
-  async save(userId: string, deckId: string, outline: Outline): Promise<OutlineResultView> {
+  async save(userId: string, deckId: string, input: unknown): Promise<OutlineResultView> {
     const { briefing } = await this.context(userId, deckId);
+
+    const parsed = parseEditedOutline(input);
+    if (!parsed.ok) throw InvalidRequest(describeOutlineIssues(parsed.issues));
+    const outline = parsed.outline;
+
     for (const section of outline.sections) {
       for (const slide of section.slides) {
         if (slide.layoutOverride !== undefined) {

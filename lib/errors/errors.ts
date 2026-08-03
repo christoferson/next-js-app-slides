@@ -15,11 +15,14 @@ export type ErrorCode =
   | "BrandInUse"
   | "DeckNotFound"
   | "SlideNotFound"
+  | "InvalidRequest"
   | "InvalidBrandConfig"
   | "InvalidSlideOrder"
   | "InvalidSlideContent"
   | "UnknownLayout"
   | "AssetNotFound"
+  | "AssetTooLarge"
+  | "UnsafeAsset"
   | "DeckNotReady"
   | "UnknownExportFormat"
   // generation
@@ -40,11 +43,14 @@ const STATUS: Record<ErrorCode, number> = {
   BrandInUse: 409,
   DeckNotFound: 404,
   SlideNotFound: 404,
+  InvalidRequest: 400,
   InvalidBrandConfig: 400,
   InvalidSlideOrder: 400,
   InvalidSlideContent: 400,
   UnknownLayout: 400,
   AssetNotFound: 404,
+  AssetTooLarge: 413,
+  UnsafeAsset: 400,
   DeckNotReady: 409,
   UnknownExportFormat: 400,
   GenerationFailed: 502,
@@ -98,6 +104,17 @@ export const DeckNotFound = (id: string) =>
 export const SlideNotFound = (id: string) =>
   new AppError("SlideNotFound", "That slide no longer exists.", { detail: { id } });
 
+/**
+ * A request body/query that failed its route-level zod schema.
+ *
+ * Distinct from `InvalidBrandConfig`, which means the *domain* rejected an otherwise well-shaped
+ * payload: this is "your JSON is not the shape this endpoint accepts" and never reaches a service. The
+ * split matters for the client, because the two are fixed differently — one by correcting a field the
+ * editor is showing, the other by the client sending the right request at all.
+ */
+export const InvalidRequest = (issues: string[]) =>
+  new AppError("InvalidRequest", "That request wasn't valid.", { detail: { issues } });
+
 export const InvalidBrandConfig = (issues: string[]) =>
   new AppError("InvalidBrandConfig", "This brand configuration isn't valid.", { detail: { issues } });
 
@@ -136,6 +153,34 @@ export const UnknownLayout = (layoutId: string, known: readonly string[]) =>
 
 export const AssetNotFound = (id: string) =>
   new AppError("AssetNotFound", "A referenced image is missing.", { detail: { id } });
+
+/**
+ * An upload over `MAX_ASSET_MB` (SPEC §5: "PNG/JPG/SVG ≤ 5MB").
+ *
+ * 413, and the limit is in the readable text: "too large" without a number leaves the user guessing how
+ * much to shrink by, and the limit is a per-deployment config value the client cannot know otherwise.
+ * Not `InvalidRequest`, because a 400 invites a client to treat it as a body-shape bug and retry the
+ * same bytes.
+ */
+export const AssetTooLarge = (byteSize: number, maxBytes: number) =>
+  new AppError("AssetTooLarge",
+    `That image is too large. The limit is ${Math.round(maxBytes / (1024 * 1024))} MB.`,
+    { detail: { byteSize, maxBytes } });
+
+/**
+ * Bytes rejected before storage: a content type we do not accept, a declared type the bytes contradict,
+ * or an SVG carrying active content (SPEC §5's "SVG sanitized").
+ *
+ * `readable` says WHAT to do about it (send a PNG/JPEG instead) rather than describing the defect,
+ * because the interesting cases are not user mistakes: an SVG with a `<script>` element is either a
+ * hostile upload or an export from a tool that embedded one, and neither is fixed by explaining
+ * XML sanitization. `reason` is a stable code for the UI; `issues` carries the field-level line the
+ * editor shows (allowlisted for the wire — see `ISSUE_BEARING`).
+ */
+export const UnsafeAsset = (reason: "type-not-allowed" | "type-mismatch" | "active-content", issues: string[]) =>
+  new AppError("UnsafeAsset",
+    "That image can't be used. Please upload a PNG or JPEG.",
+    { detail: { reason, issues } });
 
 /**
  * A step was attempted before its prerequisite: generate slides with no outline, export with no slides,
@@ -208,6 +253,52 @@ export function toReadable(err: unknown): { code: ErrorCode; message: string; st
   }
   const internal = Internal(err);
   return { code: internal.code, message: internal.readable, status: internal.status, retryable: false };
+}
+
+/**
+ * The ONLY codes whose `detail.issues` may cross the wire, and why the allowlist is a literal.
+ *
+ * `AppError.detail` is documented "logs only", and it must stay that way: it holds brand ids, asset
+ * ids, model ids, and — for `InvalidSlideOrder` — the ids the request got wrong. Yet SPEC §12 requires
+ * an invalid brand import to produce *field-level* errors ("invalid config → field-level readable zod
+ * errors, nothing partially applied"), which is precisely what `detail.issues` is.
+ *
+ * The resolution is not "serialize detail for validation codes" — it is this list plus the extractor
+ * below, which reads ONE key, proves it is an array of strings, and discards everything else in
+ * `detail`. So a future constructor that stashes a filesystem path alongside its issues cannot leak it,
+ * and a code added to the taxonomy leaks nothing until it is named here deliberately.
+ *
+ * `InvalidSlideOrder` is deliberately EXCLUDED even though it carries a `reason`: its detail is
+ * `{ reason, missing: [...] }` — slide ids, not field paths — and its readable message ("reload and try
+ * again") is already the complete useful instruction.
+ */
+const ISSUE_BEARING: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
+  "InvalidRequest", "InvalidBrandConfig", "InvalidSlideContent", "UnsafeAsset",
+]);
+
+/** The field-level messages a client may see, or `[]`. Never anything else from `detail`. */
+export function issuesOf(err: unknown): string[] {
+  if (!(err instanceof AppError) || !ISSUE_BEARING.has(err.code)) return [];
+  const raw = (err.detail as { issues?: unknown } | undefined)?.issues;
+  return Array.isArray(raw) ? raw.filter((i): i is string => typeof i === "string") : [];
+}
+
+/** What a route serializes: `toReadable` plus the allowlisted field-level issues. */
+export interface ErrorBody {
+  code: ErrorCode;
+  message: string;
+  retryable: boolean;
+  /** Present only for the issue-bearing codes above, and only when non-empty. */
+  issues?: string[];
+}
+
+export function toErrorBody(err: unknown): { body: ErrorBody; status: number } {
+  const { code, message, status, retryable } = toReadable(err);
+  const issues = issuesOf(err);
+  return {
+    body: { code, message, retryable, ...(issues.length > 0 ? { issues } : {}) },
+    status,
+  };
 }
 
 export const isAppError = (err: unknown): err is AppError => err instanceof AppError;

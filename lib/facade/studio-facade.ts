@@ -36,7 +36,7 @@
 import type { AuthProvider, Principal } from "@/lib/ports/auth-provider";
 import type { ExportResult } from "@/lib/ports/exporter";
 import type { ReadableAsset } from "@/lib/domain/asset";
-import type { AssetKind, AssetMimeType } from "@/lib/domain/asset";
+import type { AssetKind } from "@/lib/domain/asset";
 import type { BrandDefinition, BrandSummary, DesignTokens } from "@/lib/brand/types";
 import type { Briefing, DeckMeta, DeckSummary, Outline, Slide } from "@/lib/domain/deck";
 import { Unauthorized } from "@/lib/errors/errors";
@@ -65,10 +65,18 @@ export interface StudioFacadeDeps {
   export: ExportService;
 }
 
-/** Upload metadata a route extracts from multipart form data. */
+/**
+ * Upload metadata a route extracts from multipart form data.
+ *
+ * `contentType` is what the CLIENT declared — a plain string, optional, and deliberately not
+ * `AssetMimeType`. A browser derives it from the filename extension, so narrowing it here would mean this
+ * layer had vouched for it; `BrandService.addAsset` re-derives the stored type from the bytes themselves
+ * and rejects a mismatch (`checkAssetBytes`). Same reasoning for `width`/`height`: they are a fallback for
+ * formats whose bytes carry no dimensions, never the source of truth for the letterbox decision.
+ */
 export interface AssetUpload {
   filename: string;
-  contentType: AssetMimeType;
+  contentType?: string;
   kind: AssetKind;
   /** Required for `kind: "background"` — `BrandService.addAsset` enforces that, not this layer. */
   layoutId?: string;
@@ -175,7 +183,7 @@ export class StudioFacade {
   ): Promise<{ assetId: string; brand: BrandDefinition }> {
     return this.deps.brands.addAsset(await this.userId(headers), brandId, data, {
       filename: upload.filename,
-      contentType: upload.contentType,
+      ...(upload.contentType !== undefined ? { contentType: upload.contentType } : {}),
       byteSize: data.byteLength,
       kind: upload.kind,
       ...(upload.layoutId !== undefined ? { layoutId: upload.layoutId } : {}),
@@ -286,8 +294,14 @@ export class StudioFacade {
     );
   }
 
-  /** Save user edits (reorder, reword, move between sections). */
-  async saveOutline(headers: Headers, deckId: string, outline: Outline): Promise<OutlineResultView> {
+  /**
+   * Save user edits (reorder, reword, move between sections).
+   *
+   * `unknown`, matching `createBrand`/`updateBrand`: the document comes from a request body and
+   * `OutlineService.save` parses it (`parseEditedOutline`). A typed parameter here would put the outline's
+   * shape in the route's hands, and §4 forbids that second copy.
+   */
+  async saveOutline(headers: Headers, deckId: string, outline: unknown): Promise<OutlineResultView> {
     return this.deps.outline.save(await this.userId(headers), deckId, outline);
   }
 

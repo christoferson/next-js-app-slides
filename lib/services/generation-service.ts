@@ -36,8 +36,7 @@ import type { Briefing, Outline, OutlineSlide, Slide } from "@/lib/domain/deck";
 import type { BrandTone } from "@/lib/brand/types";
 import type { DeckRepository } from "@/lib/ports";
 import type { LLMPort } from "@/lib/ports/llm-port";
-import type { StreamEvent } from "@/lib/stream/events";
-import { DeckNotReady, toReadable } from "@/lib/errors/errors";
+import { DeckNotReady } from "@/lib/errors/errors";
 import { clampTemperature, requireModel } from "@/lib/models/registry";
 import {
   type DeckGenerationResult, type EmitFn, type SlideJob, type SlideOutcome,
@@ -298,12 +297,14 @@ function toSlide(outcome: SlideOutcome, plan: SlidePlan, updatedAt: string): Sli
 }
 
 /**
- * Turn a thrown error into the one `fatal` frame a stream may end with (§13: readable in-stream).
+ * `fatal`-frame construction MOVED to `lib/stream/events.ts` (§2 step 15).
  *
- * Here rather than in the route because the mapping from `AppError` to readable text is a service-layer
- * decision and the route is meant to be thin — and because both the deck and single-slide streams need
- * it, so a copy in each is a copy that will drift.
+ * It stood here through step 14 on the reasoning that error→readable mapping is a service decision. Step
+ * 15 disproved that: §5 forbids `app/**` from importing `lib/services/**`, and the streaming route needs
+ * this for the failures that happen *before* the facade is reached — an unauthenticated request, a
+ * malformed body. A route-side copy would be a second implementation of the same wire contract.
+ *
+ * Re-exported rather than deleted because the wire contract is what this is, and `lib/stream/events.ts`
+ * is where the wire contract lives. Existing importers keep working.
  */
-export function toFatalEvent(err: unknown, at: number): StreamEvent {
-  return { type: "fatal", at, message: toReadable(err).message };
-}
+export { toFatalEvent } from "@/lib/stream/events";
