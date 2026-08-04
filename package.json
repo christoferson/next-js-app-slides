@@ -30,7 +30,9 @@
     "verify:bedrock": "tsx scripts/verify-bedrock.ts",
     "verify:bedrock:models": "tsx scripts/verify-bedrock-models.ts",
     "verify:bedrock:errors": "tsx scripts/verify-bedrock-errors.ts",
-    "verify:render:all": "npm run verify:pptx:opentest && npm run verify:pptx:render && npm run verify:fonts && npm run verify:bullets"
+    "verify:render:all": "npm run verify:pptx:opentest && npm run verify:pptx:render && npm run verify:fonts && npm run verify:bullets",
+    "_comment_smoke": "CLAUDE.md §11 + §2's checkpoint-after-15. Needs a RUNNING server and live Bedrock credentials, which is why it is not part of `verify`. Start the server yourself (npm run dev) and run `npm run smoke`.",
+    "smoke": "tsx scripts/smoke.ts"
   },
   "repository": {
     "type": "git",

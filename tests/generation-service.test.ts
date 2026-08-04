@@ -541,12 +541,16 @@ describe("toFatalEvent", () => {
       type: "fatal",
       at: 1_700_000_000_000,
       message: ModelThrottled().readable,
+      // Mirrors the JSON error body's fields: without them an SSE client cannot tell a throttle worth a
+      // Retry button from a precondition failure that needs the user to go back a step.
+      code: "ModelThrottled",
+      retryable: true,
     });
   });
 
   it("collapses an unknown throw rather than leaking it into the stream", () => {
     const event = toFatalEvent(new Error("ECONNRESET at /var/task/index.js:42"), 1);
-    expect(event.type).toBe("fatal");
+    expect(event).toMatchObject({ type: "fatal", code: "Internal", retryable: false });
     // §13: in-stream errors are user-facing. A raw SDK string or a server path must never reach one.
     expect((event as { message: string }).message).not.toContain("/var/task");
     expect((event as { message: string }).message).not.toContain("ECONNRESET");

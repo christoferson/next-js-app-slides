@@ -191,7 +191,21 @@ export function getConfig(): AppConfig {
   return getContainer().config;
 }
 
-/** Test-only escape hatch, so one test's container can't leak into the next. */
-export function resetContainer(): void {
-  singleton = undefined;
+/**
+ * Test-only escape hatch, so one test's container can't leak into the next.
+ *
+ * With `replacement`, it also INSTALLS a container — which is what makes the route suites possible at
+ * all: a route reaches the singleton through `getFacade()`, so testing one against the memory backend
+ * with a scripted model means the singleton has to be the test's graph. The alternative was setting
+ * `STORAGE_BACKEND=memory` in the environment and letting the real `llm` thunk stand, which would
+ * construct a Bedrock client the moment a generation route ran — exactly what §1.3 says must not happen
+ * in a suite with no credentials.
+ *
+ * One hatch rather than two (`resetContainer` plus a `setContainer`): a setter that reads as ordinary
+ * API is one a production module would eventually call. Installing through the *reset* function keeps
+ * the only way to replace the graph spelled "reset", and `tests/architecture.test.ts` is where anything
+ * outside `tests/` calling it would be caught.
+ */
+export function resetContainer(replacement?: Container): void {
+  singleton = replacement;
 }

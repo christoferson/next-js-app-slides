@@ -13,7 +13,7 @@
  *    variant here is backward-compatible by construction.
  */
 
-import { toReadable } from "@/lib/errors/errors";
+import { type ErrorCode, toReadable } from "@/lib/errors/errors";
 
 /** Quality flags surfaced as amber badges (§12) — never suppressed. */
 export type QualityFlag =
@@ -75,10 +75,23 @@ export interface DeckDoneEvent extends StreamEventBase {
   failed: number;
 }
 
-/** The whole job failed (auth, model unreachable, aborted before any slide). */
+/**
+ * The whole job failed (auth, model unreachable, aborted before any slide).
+ *
+ * `code` and `retryable` mirror the JSON error body's fields, for the same reason `SlideErrorEvent` pairs
+ * a readable `message` with a machine `reason`: without them an SSE client cannot tell a throttle worth a
+ * Retry button from a `DeckNotReady` that needs the user to go back a step. Matching the JSON envelope
+ * exactly is what lets one client-side error renderer serve both transports — §13's "readable
+ * request-level AND in-stream" means the same information, not merely the same tone.
+ *
+ * `detail` is still absent, on both transports and for the same reason (`toErrorBody`'s allowlist).
+ */
 export interface FatalEvent extends StreamEventBase {
   type: "fatal";
   message: string;
+  /** The taxonomy code — `Internal` for anything that was not an `AppError`. */
+  code: ErrorCode;
+  retryable: boolean;
 }
 
 /** Keep-alive so proxies don't close an idle stream during a long model call. */
@@ -134,5 +147,6 @@ export function toSseFrame(event: StreamEvent): string {
  * here by another path.
  */
 export function toFatalEvent(err: unknown, at: number): StreamEvent {
-  return { type: "fatal", at, message: toReadable(err).message };
+  const { code, message, retryable } = toReadable(err);
+  return { type: "fatal", at, message, code, retryable };
 }

@@ -88,12 +88,20 @@ export async function handle(body: () => Promise<Response>): Promise<Response> {
  * without echoing the body (a parse error's text contains a slice of the input, which is exactly the
  * reflected-input problem the header's point 2 describes).
  *
- * An absent body parses as `undefined` rather than failing here, so a schema whose every field is
- * optional accepts `POST` with no body — which is what the generate and regenerate endpoints want.
+ * ## An absent body is parsed as `{}`
+ *
+ * Three endpoints have schemas whose every field is optional — `POST …/outline`, `POST …/generate`, and
+ * `POST …/slides/:id/regenerate` — and for all three a bare `POST` with no body means "do it with the
+ * defaults", which is what the wizard's buttons actually send. `undefined` would fail every one of those
+ * schemas (a zod object rejects it), so the empty object is what makes the intended request expressible.
+ *
+ * This is not a loosening for schemas that DO require fields: `{}` fails them with the same field-level
+ * issues a `{}` body sent explicitly would produce, which is more useful than a message about the body
+ * being absent — the client's next step is to add the fields either way.
  */
 export async function readJson<T>(request: Request, schema: z.ZodType<T>): Promise<T> {
   const raw = await readRawJson(request);
-  const parsed = schema.safeParse(raw);
+  const parsed = schema.safeParse(raw ?? {});
   if (!parsed.success) throw InvalidRequest(describeZodIssues(parsed.error));
   return parsed.data;
 }
