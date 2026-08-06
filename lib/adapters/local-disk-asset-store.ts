@@ -78,6 +78,7 @@ export class LocalDiskAssetStore implements AssetStore {
         : {}),
       ...(record.width !== undefined ? { width: record.width } : {}),
       ...(record.height !== undefined ? { height: record.height } : {}),
+      ...(record.luminance !== undefined ? { luminance: record.luminance } : {}),
     };
   }
 

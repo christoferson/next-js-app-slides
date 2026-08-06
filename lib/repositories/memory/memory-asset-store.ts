@@ -84,6 +84,7 @@ export class MemoryAssetStore implements AssetStore {
       ...(options?.withBytes ? { bytes: Uint8Array.from(bytes) } : {}),
       ...(record.width !== undefined ? { width: record.width } : {}),
       ...(record.height !== undefined ? { height: record.height } : {}),
+      ...(record.luminance !== undefined ? { luminance: record.luminance } : {}),
     };
   }
 

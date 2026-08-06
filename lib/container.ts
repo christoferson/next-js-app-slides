@@ -19,10 +19,11 @@
 import { loadConfig, type AppConfig } from "@/lib/config";
 import type { AssetStore, AuthProvider, BrandRepository, DeckRepository } from "@/lib/ports";
 import type { Exporter } from "@/lib/ports/exporter";
+import type { ImageLuminancePort } from "@/lib/ports/image-luminance";
 import type { LLMPort } from "@/lib/ports/llm-port";
 import {
   createAssetStore, createAuthProvider, createBrandRepository, createDeckRepository, createExporters,
-  createLLMPort,
+  createImageLuminance, createLLMPort,
 } from "@/lib/repositories/factory";
 import { registryLookup } from "@/lib/layouts/registry";
 import { createPromptLogger } from "@/lib/generation/prompt-log";
@@ -53,6 +54,8 @@ export interface Container {
    * filesystem until `export` is called, so constructing it costs nothing and §1.3 is unaffected.
    */
   readonly exporters: Readonly<Record<string, Exporter>>;
+  /** Eager: the adapter holds no state and opens nothing, so §1.3 is unaffected. */
+  readonly luminance: ImageLuminancePort;
   /**
    * Lazy, unlike the others. Constructing a `BedrockRuntimeClient` resolves credentials, and §1.3
    * requires `/api/registry/*` to be served with none configured — so the client must not exist until
@@ -97,6 +100,12 @@ export interface Services {
  */
 export interface PortOverrides {
   llm?: LLMPort;
+  /**
+   * Substitutable so a suite can assert the luminance→text-colour behaviour with a fixed number instead of
+   * a real image: the adapter is a native decoder, and a test that had to craft PNG bytes to express
+   * "this background is dark" would be testing the decoder rather than the theming it drives.
+   */
+  luminance?: ImageLuminancePort;
   now?: () => number;
   newId?: () => string;
 }
@@ -112,6 +121,7 @@ export function createContainer(
   const brands = createBrandRepository(config);
   const decks = createDeckRepository(config);
   const assets = createAssetStore(config);
+  const luminance = ports.luminance ?? createImageLuminance(config);
 
   const now = ports.now ?? Date.now;
   const newId = ports.newId ?? (() => ulid());
@@ -120,7 +130,7 @@ export function createContainer(
   const onPrompt = createPromptLogger(config.debugPrompts);
 
   const brandService = new BrandService({
-    brands, decks, assets, layouts: registryLookup, now, newId,
+    brands, decks, assets, layouts: registryLookup, luminance, now, newId,
   });
   const deckService = new DeckService({ decks, now, newId });
   const mapping = new LayoutMappingService();
@@ -153,6 +163,7 @@ export function createContainer(
     assets,
     auth,
     exporters,
+    luminance,
     llm: llmThunk,
     services,
     facade: new StudioFacade({ auth, ...services }),

@@ -22,6 +22,18 @@ export interface AssetMeta {
   kind: AssetKind;
   /** Which layout this background belongs to; unset for logos. */
   layoutId?: string;
+  /**
+   * Mean WCAG relative luminance of the image, 0..1 — sampled ONCE at upload (`ImageLuminancePort`).
+   *
+   * Absent when the bytes could not be decoded, or for an asset stored before this field existed. Both
+   * cases mean "no information": the renderer then derives text colour from `brand.colors.background`
+   * alone, which is the pre-existing behaviour.
+   *
+   * Stored rather than recomputed because it is a property of bytes that never change, and because the
+   * decode is native — keeping it out of the render path is what lets `lib/brand` stay pure and
+   * client-importable. See `lib/brand/background-luminance.ts` for the defect this closes.
+   */
+  luminance?: number;
   createdAt: string;
 }
 
@@ -57,4 +69,6 @@ export interface ResolvedAsset {
   bytes?: Uint8Array;
   width?: number;
   height?: number;
+  /** `AssetMeta.luminance`, carried through so the render path never needs a decoder. */
+  luminance?: number;
 }

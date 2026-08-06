@@ -1611,3 +1611,168 @@ test rather than by a comment.
   `ReadableStream`, returnable directly from a Next route handler.
 - Still open and unchanged by this step: ⚠️ VERIFY #5 (desktop PowerPoint open-test — deferred, not
   waived) and #6 (`AVG_ADVANCE_EM` per-face metrics). Docker smoke remains skipped by user decision.
+
+---
+
+## §2 step 15 — `app/api/*` + the §2 "Checkpoint after 15" (2026-08-05)
+
+`npm run verify` green: **33 test files, 1097 tests**, lint + both typecheck projects clean.
+`npm run smoke` green against a live `next dev` and live Bedrock: **58 checks, 0 failed.**
+
+21 route files, every one carrying `export const runtime = "nodejs"` (grep-verified — a route that
+defaulted to edge would fail at its first `fs` or `@aws-sdk` reach, but only in a deployed build, which is
+the worst place to find out).
+
+### `tests/wire-contract.test.ts` — the two serialization choke points, tested directly
+
+`toSseFrame`/`isStreamEvent`/`toFatalEvent` and `toErrorBody`/`issuesOf` were covered only *incidentally*
+until now, by whichever route or service happened to exercise them. Each is a single function every
+response of its kind passes through, and each has one failure mode no caller's test would notice:
+
+- **a frame that is well-formed for the events we happen to send but not for the ones we will add.** The
+  round-trip test walks **all 8 variants** through frame → parse → guard, so a variant added to the union
+  without a `KNOWN` entry fails here rather than being silently dropped by a client obeying §12's
+  "skip unknown types". Also asserted: the blank-line terminator (without it `EventSource` holds the last
+  frame of a stream forever), and that a payload containing newlines stays on ONE `data:` line and
+  round-trips — model-authored slide text is a realistic source of one, and a raw newline there splits a
+  single event into two frames, the second of which is not valid JSON.
+- **an error body that leaks `AppError.detail`.** The load-bearing table asserts a specific secret value is
+  absent from the *serialized* body — not that the body has the expected keys — because the failure being
+  guarded is an extra key nobody thought to exclude:
+
+  | Error | Must not appear |
+  |---|---|
+  | `BrandNotFound` / `BrandInUse` | the brand id |
+  | `ModelAccessDenied` | the model id |
+  | `AssetTooLarge` | the byte counts |
+  | `InvalidSlideOrder` | the slide ids |
+
+  `InvalidSlideOrder` is the case the module header singles out: it *has* an issues-shaped detail, but the
+  contents are slide **ids**, not field paths, so it is excluded from `ISSUE_BEARING` deliberately. The test
+  says so, in the test, so a well-meaning "it has issues, add it to the allowlist" edit fails something
+  that explains itself.
+
+  Two more: a hand-built `GenerationFailed` whose detail holds a filesystem path with `EACCES` crosses
+  **nothing** (the allowlist's whole purpose — a future constructor stashing issues beside a path leaks
+  nothing until its code is named on purpose), and non-string entries are *filtered* from an issues array
+  rather than trusted, since `detail` is typed loosely and an object in that array would serialize verbatim.
+
+### The smoke script deliberately does not own the server
+
+`scripts/smoke.ts` connects to `BASE_URL` (default port 3000); it does not spawn `next dev`. A script that
+owns the server hides the server's own output, and a compile error would then surface as a
+connection-refused rather than as the stack trace that explains it. `npm run smoke` is therefore **not**
+part of `verify` — it needs a running server AND live Bedrock credentials, and `package.json` carries that
+as a comment beside the script.
+
+Output is ASCII-only by deliberate choice: this runs under Git Bash on Windows, where a non-ASCII byte in a
+command is an exit 127.
+
+### Four things only a live server proves — all four confirmed
+
+1. **Static-vs-dynamic segment precedence.** `slides/order` sits beside `slides/[slideId]`, and
+   `brands/import` beside `brands/[brandId]`. `PUT …/slides/order` reached the **order** handler. If it
+   went the other way it would arrive at the slide handler with a slideId of `"order"` — a 404 that every
+   direct-call test in the suite would still pass, because a direct call names the module it imports.
+2. **`params` really is a Promise** in Next 16, for every one of the nested dynamic segments.
+3. **`runtime = "nodejs"` is honoured** — `fs`, the AWS SDK, and `pptxgenjs` all worked inside handlers.
+4. **SSE actually streams.** The script asserts arrival **timing**, not just frames: first `slide-done` at
+   **7422 ms**, last frame at **12517 ms**. A route that buffered the whole response would deliver every
+   frame at once and still pass a frames-only assertion. This is the property the "job runs inside
+   `ReadableStream.start`" design exists for, and it is now measured rather than reasoned about.
+
+### The live run, step by step (§11's eleven steps)
+
+| Step | Result |
+|---|---|
+| 1 brand create | 201; loud §7-greppable fixture (primary `FF00AA`, fonts `georgia`/`verdana`) |
+| 2 background upload → title template | 201; asset served back byte-identical; zones PATCHed |
+| 3 config round-trip | export JSON → re-import → **identical**; the imported copy then deleted |
+| 4 deck create + briefing | 201 / 200 |
+| 5 outline | **12.9 s**, 5 slides — within SPEC's ±2 of the requested 5; sections present |
+| 6 outline edits | message edit, reorder, `layoutOverride` all applied |
+| 7 generate (SSE) | `slide-start`/`slide-done` per slide; `deck-done` with ok 5, failed 0 |
+| 8 slot PATCH + regenerate with instruction "punchier" | content demonstrably changed; the instruction visible in the logged prompt |
+| 9 export PPTX | valid zip magic, **85572 bytes**, matching `content-length`; `Content-Disposition` carried **both** the plain and the `UTF-8''` filename forms |
+| 10 brand swap | slide content **byte-identical**; token-styled export also succeeded (**77225 bytes**) |
+| 11 deletes | referenced brand → **409 `BrandInUse`, brand id absent from the body**; deck 204 → then 404; brand then 204 |
+
+`out/SMOKE.pptx` (templated) and `out/SMOKE-SWAPPED.pptx` (token-styled) are written and ready for the
+deferred desktop open-test (⚠️ VERIFY #5).
+
+### §7 verified against REAL prompts for the first time
+
+Until now prompt purity was asserted only in `tests/prompt-purity.test.ts` (71 tests) against constructed
+brands. With `DEBUG_PROMPTS=1`, **7 real prompts** were logged during the live run (1 outline + 5 slides +
+1 regenerate), all reported `clean`. Grep counts over `out/smoke-dev.log` were **all zero** for:
+
+- any hex colour pattern
+- `FF00AA` bare (the fixture's loud primary)
+- `Georgia|Verdana|georgia|verdana` (the FONTS ids the brand actually uses)
+- `slotKey`, `defaultZones`, a JSON `"x":` key, `valign` (zone and coordinate vocabulary)
+
+Both prompts were then read end to end. They contain briefing, voice/tone guidance (the tone registry's
+`promptFragment` and banned words — content, allowed by §7), source material, structure, per-field
+descriptions with char limits, and the response format. No visual vocabulary. Preserved as
+`out/smoke-prompts.log` so the greps are reproducible without a Bedrock call.
+
+### ⚠️ OPEN DEFECT — invisible text on a dark templated background (found by the smoke run)
+
+Rendering `out/SMOKE.pptx` via LibreOffice 26.2.5.2 (5 pages): pages **3–5** (token-styled) render
+perfectly. Pages **1–2** — the `title` layout, the only one carrying the uploaded dark-navy
+`fixtures/bg-16x9.png` — show the background and the ornaments but **no visible text**.
+
+**The text is present, not missing.** `ppt/slides/slide1.xml` contains the title run with
+`srgbClr val="1A1A2E"` and `latin typeface="Georgia"`. It is dark text on a dark image.
+
+**Root cause, traced end to end:**
+
+```
+lib/layouts/defs/title.tsx   PAINT: { slotKey: "title", …, color: "onBackground" }
+lib/layouts/paint.tsx        colorOf(tokens, "onBackground") -> tokens.pairs.onBackground.fg
+lib/brand/theme.ts:113       onBackground: pairOn("background", background, …)
+                             where background = safeHex(colors.background)
+```
+
+`compileTheme(brand: BrandDefinition)` takes **only** the brand definition. It never sees a background
+image. The smoke fixture set `colors.background` to white, so `bestTextOn` correctly chose dark text —
+correctly, for the colour it was given. **Nothing tells the theme compiler that the templated background
+IMAGE is dark.**
+
+**This is NOT an §8 preview-vs-export divergence.** `SlideFrame` (`lib/layouts/preview.tsx:133`) layers the
+image over a `backgroundColor` taken from `tokens.colors.background` and paints from the same tokens, so
+the browser preview shows the *identical* invisible text. Both consumers agree; the shared-math guarantee
+holds. This is a theming/product gap, not a fidelity break — which matters, because the §8 remedy (share
+the resolver) would not touch it.
+
+**Pre-existing, not introduced by step 15.** The step-13 fixture render
+`out/render/fixture-templated/page-01.png` shows white text correctly — because that fixture brand sets a
+dark `background` (`0B0B14`), so `onBackground` resolves to near-white. The defect appears **only when the
+brand's `colors.background` and the background image disagree in luminance**, which the step-13 fixture
+avoided by construction and the smoke fixture did not.
+
+Greps of `SPEC.md`, `CLAUDE.md`, and this file found no mention of the behaviour — it is unrecorded, and
+the plausible remedies differ materially in scope (sample the uploaded image's luminance at upload and feed
+it into `compileTheme`; add an explicit per-template "background is dark" flag to the brand editor; or
+document it as expected and require the brand author to set `colors.background` to match their image, as
+the step-13 fixture does). Per **CLAUDE.md §14** this is surfaced to the user rather than fixed
+unilaterally. **No code change has been made.**
+
+### Carry-forward for §2 step 16 (frontend)
+
+- **Resolve the open defect above before the brand editor's live preview ships.** The preview shares the
+  flaw, so whichever remedy is chosen must land in `compileTheme`'s *inputs* — i.e. below both consumers —
+  or the editor will show a user their own invisible text and look like the bug.
+- **None of the SPEC §10 UI stack is installed yet**: Tailwind, shadcn/ui, lucide-react, next-themes,
+  `@dnd-kit`. `package.json` currently lists only `next`, `react`, `react-dom`, and `zod` as dependencies.
+- The preview must consume `resolveZones`, `zoneToInches`, `LOGO_BOX`, and `ruleAboveZone` (§8 — the four
+  things the export path derives its geometry from; they exist so there is nothing to hand-copy).
+- **§12's client-bundle grep is still to be run**: the AWS SDK, `pptxgenjs`, and `AWS_PROFILE` must all be
+  absent from the production client bundle. Nothing client-side exists yet, so it cannot fail yet.
+- Still-uncovered helpers at unit level: `readUpload`, `assetResponse`, `parseEditedOutline` (each is
+  covered indirectly by the route suites).
+- **§10's one-file-layout proof is not yet done** — add a throwaway `checklist` layout as one file plus one
+  registry line, then assert `git diff --stat` shows only those two.
+- Unchanged and still open: ⚠️ VERIFY #5 (desktop PowerPoint open-test — deferred, not waived;
+  `out/SMOKE.pptx` and `out/SMOKE-SWAPPED.pptx` are ready for it) and #6 (`AVG_ADVANCE_EM` per-face
+  metrics). Docker build/run smoke remains skipped by user decision.

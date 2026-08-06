@@ -56,6 +56,7 @@ import { UnknownLayout } from "@/lib/errors/errors";
 import { canUseAsMaster, imageSize, placeBackground } from "@/lib/layouts/background";
 import { assertParagraphCount } from "@/lib/layouts/pptx-text";
 import { findLayout, LAYOUTS } from "@/lib/layouts/registry";
+import { buildRenderArgs } from "@/lib/layouts/render-args";
 import { resolveZones } from "@/lib/layouts/render-mode";
 import { SLIDE_16x9, zoneToInches } from "@/lib/layouts/zone-math";
 import { relativeLuminance, parseHex } from "@/lib/brand/contrast";
@@ -148,14 +149,16 @@ export class PptxExporter implements Exporter {
     const zones = resolveZones(request.brand, layout).zones;
     const adapter = new SlideTarget(target, `slide ${index + 1} (${layout.id})`);
 
-    layout.toPptx(adapter, {
+    // Through `buildRenderArgs`, never assembled inline — it is what applies the background-luminance
+    // adjustment to `pairs.onBackground`, and the preview builds its args the same way. A second
+    // construction site here would reintroduce dark-text-on-a-dark-background for the export alone,
+    // which is the §8 divergence class exactly.
+    layout.toPptx(adapter, buildRenderArgs({
       slots: slide.slots,
       tokens,
       zones,
-      // Presence is what `isTemplated` reads to suppress a layout's own ornaments, so it must be set
-      // for the non-16:9 fallback too — that slide still carries the brand's imagery.
       ...(background ? { background } : {}),
-    });
+    }));
 
     // Logos are suppressed in Templated mode for the same reason accent rules are: a brand background
     // almost always contains the logo already, and stamping a second one on top is exactly the

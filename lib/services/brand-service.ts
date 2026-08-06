@@ -27,6 +27,7 @@
  */
 
 import type { AssetStore, BrandRepository, DeckRepository } from "@/lib/ports";
+import type { ImageLuminancePort } from "@/lib/ports/image-luminance";
 import type { AssetMeta, ReadableAsset, ResolvedAsset } from "@/lib/domain/asset";
 import { checkAssetBytes } from "@/lib/domain/asset-bytes";
 import { imageSize } from "@/lib/layouts/background";
@@ -46,6 +47,14 @@ export interface BrandServiceDeps {
   assets: AssetStore;
   /** The registry seen through the injected port — `brand-schema.ts` cannot import it (circular). */
   layouts: LayoutLookup;
+  /**
+   * Samples an uploaded background's mean luminance, once, at upload (`addAsset`).
+   *
+   * Optional so a caller with no need for it — a test asserting brand CRUD — need not stub a decoder. When
+   * absent, backgrounds are stored without a luminance, which every consumer already treats as "no
+   * information" and falls back to `brand.colors.background` for.
+   */
+  luminance?: ImageLuminancePort;
   now: () => number;
   newId: () => string;
 }
@@ -271,11 +280,18 @@ export class BrandService {
 
     const contentType = checkAssetBytes(data, meta.contentType);
     const intrinsic = imageSize(data);
+    // Sampled once, here, and stored — see `AssetMeta.luminance`. Only for backgrounds: a logo is drawn
+    // over the design rather than behind text, so its luminance answers no question anyone asks.
+    // `undefined` (no port wired, or undecodable bytes) is a supported outcome, not a failure.
+    const luminance = meta.kind === "background"
+      ? (await this.deps.luminance?.sample(data))?.mean
+      : undefined;
 
     const { assetId } = await this.deps.assets.put(userId, meta.kind, data, {
       ...meta,
       contentType,
       ...(intrinsic ?? {}),
+      ...(luminance !== undefined ? { luminance } : {}),
       createdAt: new Date(this.deps.now()).toISOString(),
     });
 
