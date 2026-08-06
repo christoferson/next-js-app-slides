@@ -1760,9 +1760,10 @@ unilaterally. **No code change has been made.**
 
 ### Carry-forward for §2 step 16 (frontend)
 
-- **Resolve the open defect above before the brand editor's live preview ships.** The preview shares the
-  flaw, so whichever remedy is chosen must land in `compileTheme`'s *inputs* — i.e. below both consumers —
-  or the editor will show a user their own invisible text and look like the bug.
+- ~~**Resolve the open defect above before the brand editor's live preview ships.**~~ **DONE** — see
+  "Invisible-text defect — RESOLVED" at the end of this file. The preview must build its `RenderArgs`
+  through `buildRenderArgs` (`lib/layouts/render-args.ts`); a second construction site that skips it
+  reintroduces the defect for the preview alone, which *would* then be a real §8 divergence.
 - **None of the SPEC §10 UI stack is installed yet**: Tailwind, shadcn/ui, lucide-react, next-themes,
   `@dnd-kit`. `package.json` currently lists only `next`, `react`, `react-dom`, and `zod` as dependencies.
 - The preview must consume `resolveZones`, `zoneToInches`, `LOGO_BOX`, and `ruleAboveZone` (§8 — the four
@@ -1776,3 +1777,134 @@ unilaterally. **No code change has been made.**
 - Unchanged and still open: ⚠️ VERIFY #5 (desktop PowerPoint open-test — deferred, not waived;
   `out/SMOKE.pptx` and `out/SMOKE-SWAPPED.pptx` are ready for it) and #6 (`AVG_ADVANCE_EM` per-face
   metrics). Docker build/run smoke remains skipped by user decision.
+
+---
+
+## Invisible-text defect — RESOLVED (2026-08-06)
+
+The §2-step-15 open defect above is closed. Chosen remedy: **sample the background image's luminance at
+upload**, store it on the asset, and adjust `pairs.onBackground` per render. `npm run verify` is green at
+**34 files / 1120 tests** (was 33 / 1097).
+
+### What was wrong
+
+`compileTheme` derives `pairs.onBackground` from `brand.colors.background` — a *colour*. In Templated mode
+the thing behind the text is an uploaded *image*. When they disagree, `bestTextOn` returns a foreground
+correct for the colour it was given and invisible against the image.
+
+Not an §8 divergence: the preview shares the flaw exactly, because `SlideFrame` layers the image over the
+same token. It was a theming gap below both consumers.
+
+### Reproduced and closed, measured through the real exporter
+
+A one-off script drove `createContainer` → `BrandService.addAsset` → `PptxExporter` and read the text colour
+straight out of the inflated `ppt/slides/slide1.xml`, for a `title` slide over `fixtures/bg-1920.png`
+(sampled mean luminance **0.0175**):
+
+| brand `colors.background` | sampling disabled | sampling enabled |
+|---|---|---|
+| `#FFFFFF` | `111111` — near-black on dark navy, **invisible** | `FAFAFA` ✅ |
+| `#0B0B14` | `FAFAFA` ✅ | `FAFAFA` ✅ |
+
+The second row is why the step-13 fixture deck never caught this: its brand background already matched its
+image, so the buggy path produced the right answer for the wrong reason. Both brands now converge on the
+same colour, which is correct — the image behind the text is identical, so the text colour should be too,
+whatever the brand declared.
+
+### ⚠️ VERIFIED CONSTRAINT — `@napi-rs/canvas` `loadImage` SEGFAULTS on a short buffer
+
+A §0.1-class finding: a native capability behaved differently than a reasonable probe suggested, and the
+difference was not catchable.
+
+- **`loadImage` faults on ≤40 bytes; ≥41 decodes.** Not a throw — a native memory fault, `exit 139`, so
+  `try/catch` cannot contain it and the process dies.
+- **The boundary is length, not structure.** 8 (PNG signature) + 25 (IHDR chunk) = 33, after which the
+  decoder reads the *next* chunk's 8-byte length+type header without bounds-checking. Probed from both
+  directions: a 24-byte body with a genuine IEND appended (36 bytes, structurally terminated) still
+  crashed; 32+IEND (44 bytes) decoded fine. **A structural or header-parse guard would NOT have closed
+  it** — only a length check, which is a guess about one decoder's internals.
+- **Reachable from an HTTP upload.** `POST /api/brands/:id/assets` hands bytes straight to the port, so a
+  40-byte body was a remote process kill. It surfaced as five dead vitest workers, from the 4-byte fixture
+  at `tests/brand-service.test.ts:17`.
+- An earlier 200-byte truncation *did* decode, which is what made the first adapter's header comment claim
+  truncated PNGs were safe. That comment was wrong; the file is gone.
+
+**Correction to the record:** the note in that adapter reading "A TRUNCATED PNG still decodes" was
+generalized from a single 200-byte probe. Truncations in the 1–40 byte range crash instead.
+
+### Two defects fixed by the swap to `sharp`
+
+`lib/adapters/canvas-image-luminance.ts` was deleted and replaced by
+`lib/adapters/sharp-image-luminance.ts`. Either reason alone is disqualifying:
+
+1. The segfault above.
+2. **`@napi-rs/canvas` is a devDependency**, and the adapter is reachable from `lib/container.ts`, which
+   every route imports. `npm ci --omit=dev` would have failed at module load on the first request — a
+   production-only crash.
+
+`sharp` **0.34.5** / libvips **8.17.3**, verified before the rewrite:
+
+- **Every hostile input throws catchably**: the 4-byte signature, 33- and 40-byte truncations
+  (`corrupt header: pngload_buffer: end of stream`), a 200-byte truncation, empty
+  (`Input Buffer is empty`), plain text. No crash, no zeroed image. This is the property that made it the
+  choice.
+- **All three SPEC §5 formats decode**, including **SVG rasterized** (a 160×90 `#0B0B14` rect →
+  `rgb(10,10,19)`, alpha 248 at the sampled corner — libvips antialiases the edge, which is why the *mean*
+  and not a single pixel is what the port returns).
+- **Byte-identical across calls** on the same input — `compileTheme`'s determinism contract (§8) reaches
+  into this number, so it was checked, not presumed.
+- A fully transparent PNG yields alpha 0 at every sample, so the `weight === 0` → `null` guard is reachable.
+- Warm decode+resize of 960×540: **~7 ms**, once per upload, never per render.
+- Declared as a **direct runtime dependency** rather than relied on transitively through `next`; `npm ls`
+  confirms `sharp@0.34.5 deduped`, one copy of the native binary.
+- `limitInputPixels` lowered to **40 MP** (sharp's default is ~268 MP). The upload route's byte limit is
+  not a bound on decoded pixels, so a small PNG could otherwise decode to gigabytes; 40 MP is far above a
+  4K 16:9 background (8.3 MP) and turns a decompression bomb into a catchable throw.
+
+### Two gates that were silently not covering this code
+
+Both are now closed, and both had been passing:
+
+- **`sharp` was absent from ESLint's `SERVER_ONLY`.** A native N-API addon cannot run in a browser, and
+  `lib/brand`'s luminance helpers are deliberately pure so the brand editor can import them — an import
+  from the wrong side would have broken the client build rather than merely bloating it.
+- **`tests/architecture.test.ts`'s §3 construction detector did not match the new class.** Its regex
+  alternation lacked the prefix, so the image-luminance adapter was exempt from the "constructed only in
+  the factory" check from the moment it was introduced. `Sharp` is now in the alternation, the
+  detector-fires test names it explicitly, and the pattern is built by a **function** rather than shared as
+  a module-level `const` — it is `/g` and therefore stateful, so one shared instance made results depend on
+  test order.
+
+### Where the fix lives, and why each piece is where it is
+
+- `lib/brand/background-luminance.ts` — pure, client-importable. `tokensForBackground` adjusts **only**
+  `pairs.onBackground`; `colors.background` is left alone because it is the letterbox-bar and slide-fill
+  colour the brand author actually chose. Returns the **same object** when nothing changes, preserving the
+  identity the exporter's master dedup and the preview's memoization both rely on.
+- The trigger is a **luminance gap**, not "the image is dark" — the failure is symmetric, and a dark-only
+  check would fix one direction and leave the other. `LUMINANCE_DIVERGENCE = 0.15`.
+- `lib/layouts/render-args.ts` — the **one** `RenderArgs` construction site. It cannot live in the painters:
+  `stats` and `quote` build their own boxes and never call `paintPreview`/`paintPptx`, so a painter-level
+  adjustment would skip exactly those layouts.
+- Not a new `compileTheme` parameter: `pairs.onBackground` is per-**brand**, a background image is
+  per-**layout**. One brand can template `title` with a dark image and leave `bullets` token-styled, and
+  those two slides need different text colours from one `DesignTokens`.
+- The repair is reported as a `contrast-repaired` notice, **appended** not replaced (§12: quality badges are
+  never suppressed).
+
+### Test coverage added — `tests/background-luminance.test.ts` (23 tests)
+
+Three levels, because the defect could be reintroduced at any one independently: the pure substitution
+(table-tested, both directions, AA-legibility, determinism, object identity, notice reporting); the
+adapter's degradation contract; and the end-to-end claim that a dark image over a light brand yields light
+text. The fixture's `textOnDark` is `FAFAFA` rather than white **on purpose** — it proves the repair uses
+the brand's declared light colour rather than a hardcoded `#FFFFFF`, which pure white could not distinguish.
+
+The short-buffer test is the regression guard for the process kill: **if it ever crashes the worker instead
+of failing, the decoder has been swapped back for one that faults instead of throwing.**
+
+### Still open
+
+- **§12's amber badge for the new notice** when the brand editor lands — `unreadableOverBackground` is
+  exported for exactly that call site and is currently unused by any UI.
+- The step-16 carry-forward above stands, minus the now-resolved defect item.

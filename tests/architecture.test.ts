@@ -36,17 +36,31 @@ describe("architecture", () => {
     expect(files).toContain("app/page.tsx");
   });
 
+  /**
+   * The §3 construction detector, built fresh per call.
+   *
+   * A function rather than a shared `const` because the pattern is `/g` and therefore STATEFUL:
+   * `lastIndex` persists across `.match`/`.toMatch` calls, so one module-level instance shared between
+   * the detector-fires test and the tree scan below would make results depend on test order.
+   *
+   * Every concrete-impl class prefix belongs in this alternation. Adding an adapter without adding its
+   * prefix here silently exempts it from the check — which is exactly what happened to the image-luminance
+   * adapter when it was introduced, so `Sharp` is now covered and the detector test names it explicitly.
+   */
+  const constructorPattern = (): RegExp =>
+    /new\s+(File|Memory|LocalDisk|Stub|Bedrock|Pptx|Sharp)[A-Za-z]*\s*\(/g;
+
   it("has a construction detector that fires", () => {
     // Proves the regex used below actually matches the thing it is meant to catch, so a green
     // result means "no violations", not "the pattern never matches anything".
-    const CONSTRUCTOR = /new\s+(File|Memory|LocalDisk|Stub|Bedrock|Pptx)[A-Za-z]*\s*\(/g;
-    expect("const r = new FileBrandRepository(dir);").toMatch(CONSTRUCTOR);
-    expect("const r = new MemoryDeckRepository();").toMatch(CONSTRUCTOR);
-    expect("const m = new Map();").not.toMatch(CONSTRUCTOR);
+    expect("const r = new FileBrandRepository(dir);").toMatch(constructorPattern());
+    expect("const r = new MemoryDeckRepository();").toMatch(constructorPattern());
+    expect("const l = new SharpImageLuminance();").toMatch(constructorPattern());
+    expect("const m = new Map();").not.toMatch(constructorPattern());
   });
 
   it("constructs concrete impls only in the repository factory", async () => {
-    const CONSTRUCTOR = /new\s+(File|Memory|LocalDisk|Stub|Bedrock|Pptx)[A-Za-z]*\s*\(/g;
+    const CONSTRUCTOR = constructorPattern();
     const ALLOWED = new Set(["lib/repositories/factory.ts"]);
     const offenders: string[] = [];
 

@@ -14,7 +14,7 @@ import type { Exporter } from "@/lib/ports/exporter";
 import type { ImageLuminancePort } from "@/lib/ports/image-luminance";
 import type { LLMPort } from "@/lib/ports/llm-port";
 import { BedrockLLMAdapter } from "@/lib/adapters/bedrock-llm-adapter";
-import { CanvasImageLuminance } from "@/lib/adapters/canvas-image-luminance";
+import { SharpImageLuminance } from "@/lib/adapters/sharp-image-luminance";
 import { PptxExporter } from "@/lib/export/pptx-exporter";
 import { FileBrandRepository } from "@/lib/repositories/file/file-brand-repository";
 import { FileDeckRepository } from "@/lib/repositories/file/file-deck-repository";
@@ -68,12 +68,12 @@ export function createAuthProvider(config: AppConfig): AuthProvider {
  * The image-luminance port. No backend switch, for the same reason `createLLMPort` has none: there is one
  * implementation, and a one-armed switch is indirection with nothing behind it.
  *
- * Constructed eagerly — `@napi-rs/canvas` is imported at module load either way (the factory is not lazy),
- * and the adapter itself holds no state and opens nothing, so this does not affect §1.3's
- * "boots with no credentials" guarantee.
+ * Constructed eagerly — `sharp` is imported at module load either way (the factory is not lazy), and the
+ * adapter itself holds no state and opens nothing, so this does not affect §1.3's "boots with no
+ * credentials" guarantee.
  */
 export function createImageLuminance(_config: AppConfig): ImageLuminancePort {
-  return new CanvasImageLuminance();
+  return new SharpImageLuminance();
 }
 
 /**

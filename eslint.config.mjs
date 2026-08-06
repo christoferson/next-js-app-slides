@@ -15,8 +15,16 @@ import next from "eslint-config-next";
  * violations instead of preventing them.
  */
 
-/** Server-only packages that must never reach the client bundle (§0.5, §12). */
-const SERVER_ONLY = ["pptxgenjs", "@aws-sdk/*", "fs", "node:fs", "fs/promises", "node:fs/promises"];
+/**
+ * Server-only packages that must never reach the client bundle (§0.5, §12).
+ *
+ * `sharp` is here for the same reason as the rest: it is a native N-API addon, so it cannot run in a
+ * browser at all, and an import from `lib/brand` (whose luminance helpers are deliberately pure so the
+ * brand editor can use them) would break the client build rather than merely bloat it.
+ */
+const SERVER_ONLY = [
+  "pptxgenjs", "sharp", "@aws-sdk/*", "fs", "node:fs", "fs/promises", "node:fs/promises",
+];
 
 const deny = (patterns) => ({ "no-restricted-imports": ["error", { patterns }] });
 
