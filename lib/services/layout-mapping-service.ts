@@ -39,6 +39,15 @@ export interface MappingPreviewRow {
   /** True when the user pinned this layout, so the UI can offer "reset to automatic". */
   overridden: boolean;
   sectionHeading?: string;
+  /**
+   * This slide's picker options, intent-ranked (`layoutOptionsFor`).
+   *
+   * Carried on the row rather than left to the client because the ranking IS the recommendation, and a
+   * client that sorted the registry itself would be §4's parallel table: its "recommended" option would
+   * drift from the chain's `reason` the moment a layout claimed a new intent. Per-row rather than
+   * per-view for the same reason — the order depends on this slide's `visualHint`.
+   */
+  options: LayoutOption[];
 }
 
 /** A layout the picker may offer, ordered by `layoutOptionsFor`. */
@@ -84,6 +93,7 @@ export class LayoutMappingService {
         rule: mapped.decision.rule,
         reason: mapped.decision.reason,
         overridden: mapped.decision.rule === "user-override",
+        options: this.layoutOptionsFor(mapped.slide),
         ...(heading !== undefined && heading.trim() !== "" ? { sectionHeading: heading } : {}),
       };
     });

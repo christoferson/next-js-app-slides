@@ -23,6 +23,7 @@
  */
 
 import type { ModelDescriptor, ModelFamily } from "@/lib/models/types";
+import { ModelNotConfigured } from "@/lib/errors/errors";
 
 /**
  * Bedrock requires this exact string in every Anthropic request body; a wrong value returns
@@ -92,8 +93,22 @@ export const findModel = (modelId: string): RegisteredModel | undefined => byId.
  * An unregistered id is *our* configuration error, not the user's — a `DEFAULT_LLM_MODEL_ID` typo
  * would otherwise surface as a Bedrock `ValidationException` mid-generation, which is both slower and
  * far harder to diagnose than failing here with the valid ids listed.
+ *
+ * Two distinct failures, because they have different fixes and different audiences:
+ *
+ *  - **Empty id** — nothing is configured. `loadConfig` cannot reject this at startup (§1.3: the app
+ *    must boot and serve the registries with no AWS configuration), so the first generate request is the
+ *    only place it can be reported, and it gets a `ModelNotConfigured` 503 naming the env var. Left as a
+ *    plain `Error` it became an opaque `Internal` 500 — "something went wrong on our side" for what is
+ *    really one unset variable.
+ *  - **A non-empty id that is not registered** — a typo, or a model removed from the registry. Still a
+ *    plain `Error` → `Internal` 500, deliberately: an operator DID configure something, so the useful
+ *    output is the full list in the server log, and the id itself must not reach the client (it is
+ *    `detail`-class information, and it is attacker-uncontrolled but still ours).
  */
 export function requireModel(modelId: string): RegisteredModel {
+  if (modelId.trim() === "") throw ModelNotConfigured(LLM_MODELS.map((m) => m.id));
+
   const model = byId.get(modelId);
   if (!model) {
     throw new Error(

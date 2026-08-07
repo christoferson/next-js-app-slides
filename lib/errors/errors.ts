@@ -28,6 +28,7 @@ export type ErrorCode =
   // generation
   | "GenerationFailed"
   // model/adapter (mapped from Bedrock — shapes verified in §1.2)
+  | "ModelNotConfigured"
   | "ModelAccessDenied"
   | "ModelThrottled"
   | "ModelInvalidRequest"
@@ -54,6 +55,9 @@ const STATUS: Record<ErrorCode, number> = {
   DeckNotReady: 409,
   UnknownExportFormat: 400,
   GenerationFailed: 502,
+  // 503, not 500: the deployment is incomplete rather than broken, and the distinction is what tells
+  // an operator to set an env var instead of reading a stack trace.
+  ModelNotConfigured: 503,
   ModelAccessDenied: 502,
   ModelThrottled: 503,
   ModelInvalidRequest: 500,
@@ -221,6 +225,25 @@ export const Internal = (cause?: unknown) =>
   new AppError("Internal", "Something went wrong on our side. Please try again.", { cause });
 
 /* ── Model errors: readable text chosen for END USERS, per §1.2's measured shapes. ── */
+
+/**
+ * Generation was attempted with no model configured — `DEFAULT_LLM_MODEL_ID` unset or empty.
+ *
+ * A deployment-shaped error, and deliberately NOT `Internal`. §1.3 requires the app to boot and serve
+ * `/api/registry/*` with no AWS configuration at all, so this cannot be a startup failure — which leaves
+ * the first generate request as the only moment it can be reported. Before this code existed it surfaced
+ * as `requireModel`'s raw throw → an opaque `Internal` 500 saying "something went wrong on our side",
+ * with the actual cause (an env var) visible only in the server log. That is the silent-degradation §14
+ * exists to prevent: the readable text now names the variable, because whoever hits this is the person
+ * who can fix it in one line.
+ *
+ * The registered ids go in `detail`, not the message: they are ours to log, and a user reading
+ * "us.anthropic.claude-opus-5" learns nothing actionable.
+ */
+export const ModelNotConfigured = (registered: readonly string[]) =>
+  new AppError("ModelNotConfigured",
+    "No AI model is configured for this deployment. Set DEFAULT_LLM_MODEL_ID and restart the server.",
+    { detail: { registered } });
 
 export const ModelAccessDenied = (modelId: string, cause?: unknown) =>
   new AppError("ModelAccessDenied",

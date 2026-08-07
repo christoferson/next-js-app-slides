@@ -28,6 +28,23 @@ import type { ResolvedAsset } from "@/lib/domain/asset";
 import type { SlotValues } from "@/lib/domain/slots";
 import type { RenderArgs } from "@/lib/layouts/types";
 
+/**
+ * What this builder needs of a background, as opposed to what the exporter happens to have.
+ *
+ * The exporter passes a full `ResolvedAsset` (it needs the bytes to embed). The browser preview has no
+ * bytes at all — it renders the image via a `url` in a CSS `background-image` — and only ever knows the
+ * `luminance` the server sampled at upload.
+ *
+ * Typing the parameter as the intersection of those two needs is what lets both call the SAME builder
+ * without a cast. The alternative was for the preview to assert `as ResolvedAsset` over an object holding
+ * one number, which would compile while stating something false — and the next person to add a field here
+ * would have no warning that one of the two callers cannot supply it.
+ */
+export interface BackgroundForRender {
+  /** Sampled at upload. Absent means "no information": the tokens are left alone. */
+  luminance?: number;
+}
+
 export interface RenderArgsInput {
   slots: SlotValues;
   /** Straight from `compileTheme` — this function applies the per-background adjustment. */
@@ -37,8 +54,11 @@ export interface RenderArgsInput {
   /**
    * Present in Templated mode only. Its `luminance` (sampled at upload) is what drives the adjustment;
    * an asset without one leaves the tokens untouched.
+   *
+   * Its mere PRESENCE is also what `isTemplated` reads to suppress a layout's own ornaments, so a caller
+   * must pass it whenever the slide has a background — even one whose luminance is unknown.
    */
-  background?: ResolvedAsset;
+  background?: BackgroundForRender;
 }
 
 /**
@@ -59,6 +79,12 @@ export function buildRenderArgs(input: RenderArgsInput): RenderArgs {
     ),
     // Presence is what `isTemplated` reads to suppress a layout's own ornaments, so it is preserved
     // exactly — including for the non-16:9 fallback, which still carries the brand's imagery.
-    ...(background ? { background } : {}),
+    //
+    // The widening to `ResolvedAsset` is confined to this ONE line, and is safe because of what reads the
+    // field: `isTemplated` tests presence, and no `FallbackRenderer` touches the bytes — a React renderer
+    // paints the image through CSS, never from a buffer. Only `toPptx` needs bytes, and only the exporter
+    // calls that, always with a real asset. Keeping the cast here rather than at each call site means the
+    // preview needs none, and this comment is the single place the reasoning has to hold.
+    ...(background ? { background: background as ResolvedAsset } : {}),
   };
 }

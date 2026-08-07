@@ -350,6 +350,33 @@ describe("POST /api/decks/:deckId/outline", () => {
     expect(h.llm.calls).toHaveLength(0);
   });
 
+  /**
+   * The exact failure that motivated `ModelNotConfigured`, at the route it was found on.
+   *
+   * Unlike `…/generate`, this endpoint is plain JSON, so an unconfigured deployment CAN be reported as a
+   * status code — and this is the assertion that it is a 503 naming the variable rather than the opaque
+   * `Internal` 500 ("something went wrong on our side") it produced before. That 500 was what a real
+   * seeding run hit, with the actual cause visible only in the server log.
+   */
+  it("503s ModelNotConfigured when DEFAULT_LLM_MODEL_ID is unset, rather than a 500", async () => {
+    const h = routeHarness({ outlineModelId: "" });
+    const { deck } = await seedDeck();
+
+    const { status, body } = await readError(
+      await postOutline(req("POST", {}), h.ctx({ deckId: deck.id })),
+    );
+
+    expect(status).toBe(503);
+    expect(body.code).toBe("ModelNotConfigured");
+    expect(body.message).toContain("DEFAULT_LLM_MODEL_ID");
+    // Not retryable: the same request will fail identically until someone sets the variable, and a Retry
+    // button here would be a lie.
+    expect(body.retryable).toBe(false);
+    // The registered ids stay in the log-only `detail` — they are ours, and useless to a user.
+    expect(JSON.stringify(body)).not.toContain("us.anthropic");
+    expect(h.llm.calls).toHaveLength(0);
+  });
+
   it("rejects a negative sectionIndex", async () => {
     const h = routeHarness();
     const { deck } = await seedDeck();

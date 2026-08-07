@@ -20,6 +20,14 @@ export interface AppConfig {
   dataDir: string;
   defaultUserId: string;
   awsRegion: string;
+  /**
+   * `""` when unset — and that is a deliberate, tested state, not an oversight.
+   *
+   * §1.3 requires the app to boot and serve `/api/registry/*` with no AWS configuration at all, so this
+   * cannot be validated here; a missing id must fail when generation is attempted. `requireModel` turns
+   * `""` into a `ModelNotConfigured` 503 whose readable text names this variable, so the empty string is
+   * carried but never silently used.
+   */
   defaultLlmModelId: string;
   /** Falls back to `defaultLlmModelId` when unset (SPEC §8: independently configurable). */
   outlineModelId: string;
@@ -72,7 +80,10 @@ function pickInt(name: string, raw: string | undefined, fallback: number, min: n
 export type EnvSource = Readonly<Record<string, string | undefined>>;
 
 export function loadConfig(env: EnvSource = process.env): AppConfig {
-  const defaultLlmModelId = env.DEFAULT_LLM_MODEL_ID ?? "";
+  // Trimmed, so `DEFAULT_LLM_MODEL_ID=" "` — trivially produced by a copied .env line — is the same
+  // "not configured" as unset rather than an id that fails at invoke time with a Bedrock
+  // ValidationException. See `defaultLlmModelId` on `AppConfig` for why "" is allowed to survive here.
+  const defaultLlmModelId = (env.DEFAULT_LLM_MODEL_ID ?? "").trim();
   return {
     storageBackend: pickEnum("STORAGE_BACKEND", env.STORAGE_BACKEND, STORAGE_BACKENDS, "file"),
     assetBackend: pickEnum("ASSET_BACKEND", env.ASSET_BACKEND, ASSET_BACKENDS, "local"),
@@ -81,9 +92,12 @@ export function loadConfig(env: EnvSource = process.env): AppConfig {
     defaultUserId: env.DEFAULT_USER_ID ?? "local-user",
     awsRegion: env.AWS_REGION ?? "us-east-1",
     // NOT validated here: §1.3 requires the app boot and serve `/api/registry/*` with no AWS
-    // config at all. A missing model id must fail when generation is attempted, not at startup.
+    // config at all. A missing model id must fail when generation is attempted, not at startup —
+    // `requireModel` does that with a readable `ModelNotConfigured`.
     defaultLlmModelId,
-    outlineModelId: env.OUTLINE_MODEL_ID || defaultLlmModelId,
+    // Trimmed for the same reason, and `||` rather than `??` so a blank override falls back to the
+    // default instead of leaving outlines unconfigured while slides work.
+    outlineModelId: (env.OUTLINE_MODEL_ID ?? "").trim() || defaultLlmModelId,
     generationConcurrency: pickInt("GENERATION_CONCURRENCY", env.GENERATION_CONCURRENCY, 2, 1, 8),
     maxAssetBytes: pickInt("MAX_ASSET_MB", env.MAX_ASSET_MB, 5, 1, 50) * 1024 * 1024,
     maxSourceTextChars: pickInt("MAX_SOURCE_TEXT_CHARS", env.MAX_SOURCE_TEXT_CHARS, 20_000, 1_000, 500_000),

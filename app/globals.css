@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+/**
+ * The STUDIO's own chrome — deliberately not the user's brand.
+ *
+ * A hard rule for every component under `components/`: the app shell is neutral greys, and brand colours
+ * appear ONLY inside a slide preview, driven by `DesignTokens` from `compileTheme`. Mixing the two would
+ * make "is this the brand's blue or the app's blue?" unanswerable at a glance, which is the one question a
+ * brand editor must never leave ambiguous.
+ */
+@theme {
+  --color-ink: #14141b;
+  --color-ink-soft: #3f3f4b;
+  --color-line: #e3e3e8;
+  --color-canvas: #f7f7f9;
+
+  /* Quality-badge amber (§12). One colour, so a badge is recognizable wherever it appears. */
+  --color-flag: #b45309;
+  --color-flag-bg: #fef3c7;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html {
+    /* `next-themes` toggles `.dark` on <html>; dark mode is a later pass, not faked here. */
+    background: var(--color-canvas);
+    color: var(--color-ink);
+  }
+
+  body {
+    /* System stack for the CHROME. Brand faces load only inside a preview surface, where the brand's own
+     * `cssStack` from the FONTS registry applies — see `components/preview/`. */
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Visible focus everywhere, since much of this app is numeric zone editing done from the keyboard. */
+  :focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
+  }
+}

@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createContainer, getContainer, resetContainer } from "@/lib/container";
 import { loadConfig } from "@/lib/config";
+import { requireModel } from "@/lib/models/registry";
 import { MemoryBrandRepository } from "@/lib/repositories/memory/memory-brand-repository";
 import { FileBrandRepository } from "@/lib/repositories/file/file-brand-repository";
 import { MemoryAssetStore } from "@/lib/repositories/memory/memory-asset-store";
@@ -66,6 +67,19 @@ describe("container / factory", () => {
     expect(() => createContainer({ storageBackend: "memory", assetBackend: "memory" })).not.toThrow();
   });
 
+  /**
+   * The other half of the rule above, and the reason `""` is safe to carry.
+   *
+   * §1.3 says an unset model id must not stop the app booting; §3/§14 say it must not silently degrade
+   * either. Both hold only because the empty string is rejected at the point of USE — this pairs the
+   * "boots with nothing configured" assertion with the failure that makes it acceptable, so deleting one
+   * without the other fails the suite.
+   */
+  it("turns an unset model id into a readable failure at use, not a silent default", () => {
+    expect(() => requireModel(loadConfig({}).defaultLlmModelId))
+      .toThrow(/No AI model is configured/);
+  });
+
   it("defaults OUTLINE_MODEL_ID to the default model", () => {
     const config = loadConfig({ DEFAULT_LLM_MODEL_ID: "us.anthropic.claude-opus-5" });
     expect(config.outlineModelId).toBe("us.anthropic.claude-opus-5");
@@ -73,6 +87,16 @@ describe("container / factory", () => {
       DEFAULT_LLM_MODEL_ID: "us.anthropic.claude-opus-5", OUTLINE_MODEL_ID: "other",
     });
     expect(overridden.outlineModelId).toBe("other");
+  });
+
+  it("treats a whitespace-only model id as unset rather than as an id", () => {
+    // `DEFAULT_LLM_MODEL_ID=" "` is trivially produced by editing a copied .env line. Untrimmed it
+    // reaches Bedrock and comes back as a ValidationException — much further from the cause.
+    expect(loadConfig({ DEFAULT_LLM_MODEL_ID: "  " }).defaultLlmModelId).toBe("");
+    // A blank OUTLINE_MODEL_ID falls back to the default instead of leaving outlines unconfigured
+    // while slide generation works — a split that would be baffling to diagnose.
+    expect(loadConfig({ DEFAULT_LLM_MODEL_ID: "us.anthropic.claude-opus-5", OUTLINE_MODEL_ID: "   " })
+      .outlineModelId).toBe("us.anthropic.claude-opus-5");
   });
 
   it("does not construct the Bedrock client until the LLM port is asked for (§1.3)", () => {

@@ -79,6 +79,18 @@ export interface ResolvedTemplate {
   zones: LayoutTemplate["zones"];
   zonesCustomized: boolean;
   backgroundAssetId?: string;
+  /**
+   * The background image's sampled mean luminance, when it has one.
+   *
+   * Carried to the CLIENT deliberately: the browser preview must reproduce the exporter's text colour, and
+   * that colour depends on this number (`lib/brand/background-luminance.ts`). The preview cannot compute it
+   * — sampling needs a native decoder — so without it here the preview would show dark-on-dark text for
+   * exactly the brands the exporter renders correctly, which is the §8 divergence class.
+   *
+   * Absent when the layout is token-styled, when the asset predates sampling, or when its bytes could not
+   * be decoded; every consumer treats absence as "no information" and leaves the tokens alone.
+   */
+  backgroundLuminance?: number;
 }
 
 export class BrandService {
@@ -143,7 +155,32 @@ export class BrandService {
       zones: plan.zones,
       zonesCustomized: plan.zonesCustomized,
       ...(plan.backgroundAssetId !== undefined ? { backgroundAssetId: plan.backgroundAssetId } : {}),
+      ...(await this.backgroundLuminance(userId, plan.backgroundAssetId)),
     };
+  }
+
+  /**
+   * The background's sampled luminance, for `ResolvedTemplate` — metadata only, never the bytes.
+   *
+   * `withBytes` is left off (the port's default), so this is a metadata read: the preview needs one number
+   * and loading a multi-megabyte image server-side to hand it over would make every workspace load pay for
+   * a decode it does not use.
+   *
+   * A missing asset yields `{}` rather than throwing. The reason is the same one `resolveOrSkip` gives on
+   * the render path: this value only nudges a text colour, so an asset whose record has gone means "no
+   * information", and failing a whole workspace load over a cosmetic hint would turn a degraded preview
+   * into no preview at all.
+   */
+  private async backgroundLuminance(
+    userId: string, assetId: string | undefined,
+  ): Promise<{ backgroundLuminance?: number }> {
+    if (assetId === undefined) return {};
+    try {
+      const asset = await this.deps.assets.resolve(userId, assetId);
+      return asset.luminance !== undefined ? { backgroundLuminance: asset.luminance } : {};
+    } catch {
+      return {};
+    }
   }
 
   /* ─────────────────────────────── writes ─────────────────────────────── */

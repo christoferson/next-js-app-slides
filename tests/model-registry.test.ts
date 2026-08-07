@@ -124,6 +124,44 @@ describe("requireModel", () => {
   it("throws on a bare id rather than passing it to Bedrock", () => {
     expect(() => requireModel("anthropic.claude-opus-5")).toThrow(/Unknown model id/);
   });
+
+  /**
+   * An UNSET id is a different failure from a wrong one, and it used to be conflated.
+   *
+   * §1.3 forbids validating `DEFAULT_LLM_MODEL_ID` at startup — the app must boot with no AWS config —
+   * so `config.defaultLlmModelId` is legitimately `""` and this is the first place it can be caught.
+   * With the old plain `Error` it reached the route as an opaque `Internal` 500 ("something went wrong
+   * on our side") for what is one unset environment variable. The 503 + named variable is the fix, and
+   * these two assertions are what stop it regressing to a 500.
+   */
+  it("reports an UNSET id as a readable ModelNotConfigured, not an Internal 500", () => {
+    expect(() => requireModel("")).toThrow(
+      /No AI model is configured for this deployment\. Set DEFAULT_LLM_MODEL_ID/,
+    );
+    // Whitespace-only is the same state: `loadConfig` trims, and a config that bypassed it must not
+    // become a Bedrock ValidationException instead.
+    for (const blank of ["", "   ", "\t"]) {
+      try {
+        requireModel(blank);
+        expect.unreachable(`requireModel(${JSON.stringify(blank)}) should throw`);
+      } catch (err) {
+        expect(err).toMatchObject({ code: "ModelNotConfigured", status: 503, retryable: false });
+      }
+    }
+  });
+
+  it("keeps the registered ids out of the user-visible text for an unset id", () => {
+    // They are `detail`-class: an operator needs them in the log, a user learns nothing from
+    // "us.anthropic.claude-opus-5". `toErrorBody`'s allowlist excludes ModelNotConfigured, so this is
+    // belt-and-braces on the readable message itself.
+    try {
+      requireModel("");
+      expect.unreachable("should throw");
+    } catch (err) {
+      expect((err as Error).message).not.toContain(DEFAULT_MODEL_ID);
+      expect((err as { detail?: { registered?: string[] } }).detail?.registered).toContain(DEFAULT_MODEL_ID);
+    }
+  });
 });
 
 describe("clampTemperature", () => {

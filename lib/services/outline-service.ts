@@ -258,7 +258,9 @@ export class OutlineService {
    *
    * `requireModel` throws a plain `Error` for an unregistered id — deliberately, because that is *our*
    * configuration mistake (a `DEFAULT_LLM_MODEL_ID` typo), and letting it surface as an `Internal` 500
-   * with the valid ids in the log is more useful than a 400 blaming the user's request.
+   * with the valid ids in the log is more useful than a 400 blaming the user's request. An UNSET id is
+   * the separate `ModelNotConfigured` 503, since a deployment that was never configured is a different
+   * problem from one configured wrongly, and only the first has a one-line fix.
    */
   private pipelineDeps(options: { temperature?: number; signal?: AbortSignal }) {
     const model = requireModel(this.deps.modelId);

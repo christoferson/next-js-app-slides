@@ -157,6 +157,31 @@ describe("POST /api/decks/:deckId/generate", () => {
     expect(String(events[0]?.message)).toMatch(/outline/i);
   });
 
+  /**
+   * A deployment with no `DEFAULT_LLM_MODEL_ID`, on the wire.
+   *
+   * The unit test in `model-registry.test.ts` proves `requireModel("")` throws the right `AppError`; this
+   * proves the frame a browser actually receives, because the two used to disagree in the way that
+   * matters. `requireModel` is called inside the streaming job, so the headers are already sent and this
+   * cannot be a 503 status — it has to be a `fatal` frame carrying the 503's code, and the client's error
+   * renderer keys off `code`. Before `ModelNotConfigured` existed the frame said `Internal` /
+   * "something went wrong on our side", pointing whoever hit it at a stack trace rather than at an env var.
+   */
+  it("reports an unconfigured model as a readable fatal frame, not an opaque Internal", async () => {
+    const h = routeHarness({ defaultLlmModelId: "" });
+    const { deck } = await readyDeck(h);
+
+    const response = await generate(req("POST", {}), h.ctx({ deckId: deck.id }));
+    const events = sseEvents(await readStream(response));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "fatal", code: "ModelNotConfigured", retryable: false });
+    // Names the variable to set. "Retrying" cannot help, which is what `retryable: false` tells the UI.
+    expect(String(events[0]?.message)).toContain("DEFAULT_LLM_MODEL_ID");
+    // The model was never called — this fails before any spend, unlike a bad id that fails at Bedrock.
+    expect(h.llm.calls).toHaveLength(0);
+  });
+
   it("rejects a malformed body as a JSON 400, NOT a stream with one fatal frame", async () => {
     const h = routeHarness();
     const { deck } = await readyDeck(h);

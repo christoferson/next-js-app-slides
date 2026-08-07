@@ -1908,3 +1908,147 @@ of failing, the decoder has been swapped back for one that faults instead of thr
 - **§12's amber badge for the new notice** when the brand editor lands — `unreadableOverBackground` is
   exported for exactly that call site and is currently unused by any UI.
 - The step-16 carry-forward above stands, minus the now-resolved defect item.
+
+---
+
+## §2 step 16 (part 1) — the screens are clickable, and generation runs through them (2026-08-07)
+
+Landing page, brands gallery, decks list, briefing form, and the deck **workspace** (live-streaming
+generation, per-slot editing, layout switcher, regenerate-with-instruction, amber quality badges, PPTX
+download). `npm run verify` green: lint + both typecheck projects + **34 files / 1124 tests**.
+
+### The blocker was a silent default, and it is now a readable failure
+
+`scripts/seed-demo-deck.ts` — a new script that drives the same HTTP API the browser uses, so anything it
+cannot do the UI cannot either — failed at `POST /api/decks/:id/outline` with an opaque **`Internal` 500**.
+The dev log had the real cause:
+
+```
+Unknown model id "". Registered models: us.anthropic.claude-opus-5, …
+    at requireModel (lib/models/registry.ts:99)
+    at OutlineService.pipelineDeps (lib/services/outline-service.ts:264)
+```
+
+`lib/config.ts` read `env.DEFAULT_LLM_MODEL_ID ?? ""`, and there was no `.env.local`. So an unset model id
+became `""`, `requireModel` threw a plain `Error`, and `toReadable` collapsed it to "Something went wrong on
+our side." **This is the silent-default-in-a-prod-path §3 forbids** — the whole cause was one unset variable
+and nothing user-visible said so.
+
+The fix is deliberately **not** validation in `loadConfig`: §1.3 requires the app to boot and serve
+`/api/registry/*` with no AWS configuration at all, so a startup throw would break a verified guarantee.
+Instead:
+
+- new taxonomy code **`ModelNotConfigured` → 503**, `retryable: false`, readable text *naming the variable*
+  ("Set DEFAULT_LLM_MODEL_ID and restart the server"). 503 not 500 because the deployment is *incomplete*,
+  not broken — that is what tells an operator to set an env var instead of reading a stack trace.
+- `requireModel("")` throws it; a non-empty **unregistered** id still throws the plain `Error` → `Internal`
+  500, on purpose: someone *did* configure something, so the useful output is the full id list in the log,
+  and the id itself is `detail`-class.
+- `loadConfig` now **trims** both ids, so `DEFAULT_LLM_MODEL_ID=" "` (trivially produced by editing a copied
+  `.env` line) is the same "not configured" rather than an id that fails later at Bedrock. `OUTLINE_MODEL_ID`
+  keeps `||` so a blank override falls back instead of leaving outlines unconfigured while slides work — a
+  split that would be baffling to diagnose.
+- The registered ids go in `detail`, never the message. Asserted: `JSON.stringify(body)` contains no
+  `us.anthropic`.
+
+Covered at three levels, because it could regress at any one independently: the unit
+(`requireModel("")` / `" "` / `"\t"` → code, status, retryable), the **JSON route** (`POST …/outline` → 503
+naming the variable), and the **SSE route** (`POST …/generate` → one `fatal` frame with
+`code: "ModelNotConfigured"`, since by then the headers are sent and it cannot be a status). A container test
+now pairs "boots with nothing configured" with "fails readably at use", so deleting one without the other
+fails the suite.
+
+### The full pipeline, run end to end through the HTTP API
+
+`.env.local` created (gitignored) with the ratified `DEFAULT_LLM_MODEL_ID=us.anthropic.claude-opus-5` and
+`DEBUG_PROMPTS=1`. Dev server log confirms `Environments: .env.local`.
+
+| Step | Result |
+|---|---|
+| brand (non-default palette + `georgia`/`verdana` + `consultative` tone) | created |
+| briefing → outline | **3 sections, 6 slides, `repaired=false`, advisories `[]`** |
+| generate (SSE) | `deck-start` → 6× `slide-start`/`slide-done` → `deck-done {ok: 6, failed: 0}`, **no flags** |
+| workspace aggregate | 6 slides, `formats=pptx`, theme notices `[]` |
+| pages `/`, `/brands`, `/decks`, `/decks/:id`, `/decks/:id/briefing` | all **200** |
+| `GET …/export/pptx` | **200, 93,676 bytes**, correct MIME + RFC 5987 `content-disposition` |
+
+Concurrency is visibly working in the frames: slides 0 and 1 start together, and each `slide-done` is
+immediately followed by the next `slide-start` (`GENERATION_CONCURRENCY=2`).
+
+`/decks/:id/outline` returns **404** — expected, that screen is not built yet (see Still open).
+
+### The exported deck was rendered and read, not just measured
+
+`out/render/seed/page-*.png` via LibreOffice 26.2.5.2, 6 pages. The brand reaches the render path: cream
+`FBF9F4` ground, dark-green `14211C` ink, `C9743B` accent rule and stat figures, Georgia headings against
+Verdana body. The `stats` slide's three surface panels, figures, labels, and captions all land in their
+zones. **C5 holds on real generated content** — the `bullets` slide shows four separate bulleted paragraphs,
+not one collapsed run.
+
+### §7 verified against real prompts a second time, on a different brand
+
+7 prompts logged (1 outline + 6 slides), **all `clean`**. Worth recording because the check is now
+*continuous* rather than a one-off: `createPromptLogger` runs `promptImpurities` on every prompt and states
+the verdict in the first line, so a future registry entry that leaks a colour or font name trips it in the
+dev log without anyone writing a new test. (A separate log-scanning script was written and then deleted — it
+would have been a weaker duplicate of the runtime scanner.)
+
+### Two production-only crashes found and fixed — same class as the `@napi-rs/canvas` one
+
+`pptxgenjs` and `@aws-sdk/client-bedrock-runtime` were in **`devDependencies`** while imported at the top
+level from `lib/export/pptx-exporter.ts` and `lib/repositories/factory.ts` — both reachable from
+`lib/container.ts`, which every route imports. `npm ci --omit=dev` would therefore have crashed at module
+load **on the first request, in production only**. Both moved to `dependencies`, `pptxgenjs` pinned exact
+(the §1.1 C1–C5 constraints were verified against 4.0.1 specifically). `package.json` now carries the
+mechanical test as a comment: *if any file reachable from `lib/container.ts` imports it at the top level, it
+belongs in `dependencies`*. `officeparser`/`pdfjs-dist`/`@napi-rs/canvas` verified scripts-only, left dev.
+
+### §12's client-bundle grep — PASSED, and the pass is now trustworthy
+
+`scripts/verify-client-bundle.mjs` scans `.next/static/**/*.js` (`.map` excluded deliberately: sourcemaps
+name every module the bundle was built from, including tree-shaken ones) for six needles — each server
+package as both its specifier and a distinctive runtime marker.
+
+**A grep that passes because its patterns match nothing is worse than no check.** So `--self-test` runs the
+same needles against `.next/server/**`, where these libraries genuinely do live, and fails if one matches
+nothing there:
+
+```
+Self-test: 147 server chunk(s) under .next/server.
+  ✅ @aws-sdk (package specifier) → 1 chunk(s)
+  ✅ @aws-sdk (runtime marker) → 1 chunk(s)
+  ✅ pptxgenjs (package specifier) → 1 chunk(s)
+  ✅ pptxgenjs (runtime marker) → 1 chunk(s)
+  ⚠️  AWS_PROFILE → 0 chunk(s)
+  ⚠️  sharp (native addon) → 0 chunk(s)
+```
+
+Two documented exemptions from must-fire, each for a stated reason rather than convenience: `AWS_PROFILE`
+appears in **neither** bundle (the SDK reads it from the environment; the only repo references are
+`scripts/**` and one comment), and Next externalizes native addons so `sharp`'s `require` is not a literal.
+Both needles stay as regression guards. **§12's bundle-grep item is closed.**
+
+### `components/use-resource.ts` — one loader, and an honest fix for a lint rule
+
+All four screens had the same stale-response race: an in-flight load could resolve after a newer one and
+overwrite it. `useResource` fixes it with a liveness guard and gives every screen one way to load state.
+
+It also resolves 5 × `react-hooks/set-state-in-effect`. The rule traces into `useCallback`'d loaders, and a
+synchronous `setState` at the top of an awaited loader trips it. Probing it with throwaway variants found
+that wrapping the body in an **async IIFE silences the rule without fixing anything** — it only defeats the
+tracing. That was rejected. The two remaining violations were removed by `key`-remount (React's documented
+alternative to seeding state in an effect), which is why `SlidePanel` is keyed by
+`slide.id` + `slide.updatedAt` and `BriefingForm` by `deck.updatedAt`: a save that truncated content
+re-initializes the draft from the server's copy instead of being typed back over.
+
+### Still open
+
+- **Screens not yet built**: `/brands/[brandId]` editor (zone table + live preview, asset upload, JSON
+  import/export), the outline editor (`outlineView`/`saveOutline`/`setSlideLayout` are wired server-side and
+  unused by any UI — hence the 404 above), `@dnd-kit` slide reorder, `next-themes` provider.
+- **§12 notes needing those screens**: zone-table edits reflecting immediately in the preview; the letterbox
+  warning; the `contrast-repaired` amber badge (`unreadableOverBackground` is called by the workspace now, so
+  that one is no longer unused).
+- **§10's one-file layout proof** (`checklist` + one registry line, then `git diff --stat`).
+- Deferred/flagged, unchanged: desktop PowerPoint open-test (⚠️ VERIFY #5 — deferred, not waived),
+  `AVG_ADVANCE_EM` per-face metrics (⚠️ VERIFY #6), Docker smoke (skipped by user decision).
