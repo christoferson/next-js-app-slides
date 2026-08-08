@@ -40,10 +40,17 @@ export interface RenderPlan {
  * makes wholesale replacement safe.
  *
  * Returns a fresh array — a caller must not be able to mutate the registry's `defaultZones`.
+ *
+ * Both parameters are `Pick`s of what this function actually reads, and that is load-bearing rather than
+ * fastidious. The brand editor resolves zones for a DRAFT brand (unsaved, so no `id`/timestamps) against a
+ * `LayoutSummary` from `/api/registry/layouts` (which carries `slots` and `defaultZones` but no
+ * `FallbackRenderer` or `toPptx`, neither being serializable). Declaring the full `SlideLayout` would force
+ * that screen to cast — and a cast at the one call site §8 is written about is exactly where a type lie
+ * could later hide a real mismatch.
  */
 export function resolveZones(
   brand: Pick<BrandDefinition, "templates"> | undefined,
-  layout: SlideLayout,
+  layout: Pick<SlideLayout, "id" | "defaultZones">,
 ): { zones: SlotZone[]; customized: boolean } {
   const template = brand?.templates[layout.id];
   if (template && template.zones.length > 0) {

@@ -27,10 +27,13 @@ const BUTTON_BASE =
   + "disabled:pointer-events-none disabled:opacity-50";
 
 const BUTTON_VARIANT: Record<NonNullable<ButtonProps["variant"]>, string> = {
-  primary: "bg-ink text-white hover:bg-ink-soft",
-  secondary: "border border-line bg-white text-ink hover:bg-canvas",
+  // `text-canvas`, not `text-white`: the fill is `bg-ink`, which becomes near-white in dark mode, so a
+  // fixed white label would be white-on-white. Pairing the two tokens keeps the contrast inverted with
+  // the theme instead of surviving only by luck in one of them.
+  primary: "bg-ink text-canvas hover:bg-ink-soft",
+  secondary: "border border-line bg-surface text-ink hover:bg-canvas",
   ghost: "text-ink-soft hover:bg-canvas hover:text-ink",
-  danger: "border border-red-200 bg-white text-red-700 hover:bg-red-50",
+  danger: "border border-danger-line bg-surface text-danger hover:bg-danger-bg",
 };
 
 const BUTTON_SIZE: Record<NonNullable<ButtonProps["size"]>, string> = {
@@ -53,7 +56,7 @@ export function Button({ variant = "secondary", size = "md", className, ...rest 
 /* ─────────────────────────────── inputs ─────────────────────────────── */
 
 const FIELD_BASE =
-  "w-full rounded-md border border-line bg-white px-2.5 py-1.5 text-sm text-ink "
+  "w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink "
   + "placeholder:text-ink-soft/60 disabled:opacity-50";
 
 export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
@@ -75,7 +78,7 @@ export function Field(
 /* ─────────────────────────────── containers ─────────────────────────────── */
 
 export function Card({ className, ...rest }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("rounded-lg border border-line bg-white", className)} {...rest} />;
+  return <div className={cn("rounded-lg border border-line bg-surface", className)} {...rest} />;
 }
 
 /* ─────────────────────────────── quality badge (§12) ─────────────────────────────── */
@@ -112,7 +115,7 @@ export function ErrorNote(
   { message, issues, onRetry }: { message: string; issues?: readonly string[]; onRetry?: () => void },
 ) {
   return (
-    <div role="alert" className="space-y-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+    <div role="alert" className="space-y-2 rounded-md border border-danger-line bg-danger-bg p-3 text-sm text-danger">
       <p>{message}</p>
       {issues !== undefined && issues.length > 0 && (
         <ul className="list-inside list-disc space-y-0.5 text-xs">

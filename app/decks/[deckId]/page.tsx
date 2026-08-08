@@ -38,6 +38,7 @@ import { ApiError, api, streamGeneration } from "@/lib/client/api";
 import { useResource } from "@/components/use-resource";
 import { Button, Card, Empty, ErrorNote, Field, Flag, Input } from "@/components/ui/primitives";
 import { SlidePreview } from "@/components/preview/slide-preview";
+import { SlideGrid } from "@/components/workspace/slide-grid";
 import { SlotEditor } from "@/components/workspace/slot-editor";
 
 /**
@@ -72,7 +73,7 @@ const FLAG_TEXT: Record<QualityFlag, string> = {
 export default function WorkspacePage({ params }: { params: Promise<{ deckId: string }> }) {
   const { deckId } = use(params);
 
-  const { data, error: loadError, reload } = useResource(
+  const { data, error: loadError, reload, set } = useResource(
     useCallback(async () => {
       const [workspace, registry] = await Promise.all([
         api.decks.workspace<WorkspaceView>(deckId),
@@ -203,6 +204,31 @@ export default function WorkspacePage({ params }: { params: Promise<{ deckId: st
       reload();
     });
 
+  /**
+   * Drag-reorder (§9, §12).
+   *
+   * Deliberately NOT routed through `run`: that helper sets a global `busy` key, which would disable the
+   * whole grid for the length of the request and make a second drag impossible right after the first —
+   * the interaction people actually perform when tidying a deck. `SlideGrid` already shows the dropped
+   * position optimistically, so there is nothing to wait for visually.
+   *
+   * The response IS the authoritative list, so it replaces local state directly rather than triggering a
+   * full aggregate reload: a reorder cannot change tokens, zones, or slot content — only `order` — so
+   * re-reading the brand and templates would be a wasted round trip. `set` keeps the rest of the aggregate
+   * untouched. On failure the grid falls back to `view.slides`, which is still the server's truth, so a
+   * rejected permutation (`InvalidSlideOrder` from a stale client) visibly snaps back with the reason.
+   */
+  const reorder = async (orderedIds: string[]): Promise<void> => {
+    setActionError(undefined);
+    try {
+      const { slides } = await api.decks.reorderSlides<{ slides: Slide[] }>(deckId, { orderedIds });
+      data && set({ ...data, workspace: { ...data.workspace, slides } });
+    } catch (cause) {
+      if (cause instanceof ApiError) setActionError(cause);
+      else throw cause;
+    }
+  };
+
   if (view === undefined) {
     return loadError
       ? <ErrorNote message={loadError.message} issues={loadError.issues} onRetry={reload} />
@@ -260,7 +286,7 @@ export default function WorkspacePage({ params }: { params: Promise<{ deckId: st
               <a
                 key={format}
                 href={api.exportUrl(view.deck.id, format)}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-line bg-white px-3.5 text-sm font-medium hover:bg-canvas"
+                className="inline-flex h-9 items-center gap-2 rounded-md border border-line bg-surface px-3.5 text-sm font-medium hover:bg-canvas"
               >
                 <Download aria-hidden className="size-4" />
                 .{format}
@@ -295,7 +321,7 @@ export default function WorkspacePage({ params }: { params: Promise<{ deckId: st
           <div className="flex gap-2">
             <Link
               href={`/decks/${view.deck.id}/briefing`}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-line bg-white px-3.5 text-sm font-medium hover:bg-canvas"
+              className="inline-flex h-9 items-center gap-2 rounded-md border border-line bg-surface px-3.5 text-sm font-medium hover:bg-canvas"
             >
               {view.deck.briefing ? "Edit briefing" : "Add briefing"}
             </Link>
@@ -315,41 +341,53 @@ export default function WorkspacePage({ params }: { params: Promise<{ deckId: st
 
       {view.slides.length > 0 && (
         <div className="grid gap-6 lg:grid-cols-[1fr_22rem]">
-          {/* Ordered by `order`, the only field `reorderSlides` may rewrite. */}
-          <ul className="grid gap-4 sm:grid-cols-2">
-            {ordered.map((slide) => {
+          {/*
+            Ordered by `order`, the only field `reorderSlides` may rewrite. `SlideGrid` owns the drag
+            interaction but holds no order state between drags — `ordered` stays the source of truth, which
+            is why a rejected permutation snaps back to the server's answer rather than to a local guess.
+
+            Reordering is disabled DURING generation: slides are being appended as the stream arrives, so a
+            permutation computed from a partial deck would be rejected by the route anyway (it validates a
+            full permutation), and the drag would fail for reasons the user cannot see.
+          */}
+          <SlideGrid
+            items={ordered}
+            keyOf={(slide) => slide.id}
+            labelOf={(slide) => `Slide ${slide.order + 1}, ${slide.layoutId}`}
+            onReorder={(orderedIds) => void reorder(orderedIds)}
+            disabled={generating}
+          >
+            {(slide) => {
               const background = backgroundFor(slide.layoutId);
               return (
-                <li key={slide.id}>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedId(slide.id)}
-                    aria-current={slide.id === selectedId}
-                    className={
-                      "block w-full space-y-1.5 rounded-lg border p-1.5 text-left transition-colors "
-                      + (slide.id === selectedId ? "border-ink" : "border-line hover:border-ink-soft")
-                    }
-                  >
-                    <SlidePreview
-                      brand={view.brand}
-                      tokens={view.tokens}
-                      layoutId={slide.layoutId}
-                      slots={slide.slots}
-                      {...(background !== undefined ? { background } : {})}
-                    />
-                    <div className="flex flex-wrap items-center gap-1.5 px-1 pb-0.5">
-                      <span className="text-xs text-ink-soft">{slide.order + 1}</span>
-                      <span className="text-xs text-ink-soft">{slide.layoutId}</span>
-                      {slide.flags.map((flag) => (
-                        <Flag key={flag} title={FLAG_TEXT[flag]}>{flag}</Flag>
-                      ))}
-                      {slide.issue && <Flag title={slide.issue.message}>{slide.issue.reason}</Flag>}
-                    </div>
-                  </button>
-                </li>
+                <button
+                  type="button"
+                  onClick={() => setSelectedId(slide.id)}
+                  aria-current={slide.id === selectedId}
+                  className={
+                    "block w-full space-y-1.5 rounded-lg border bg-surface p-1.5 text-left transition-colors "
+                    + (slide.id === selectedId ? "border-ink" : "border-line hover:border-ink-soft")
+                  }
+                >
+                  <SlidePreview
+                    brand={view.brand}
+                    tokens={view.tokens}
+                    layoutId={slide.layoutId}
+                    slots={slide.slots}
+                    {...(background !== undefined ? { background } : {})}
+                  />
+                  <div className="flex flex-wrap items-center gap-1.5 px-1 pb-0.5">
+                    <span className="text-xs text-ink-soft">{slide.order + 1}</span>
+                    <span className="text-xs text-ink-soft">{slide.layoutId}</span>
+                    {slide.flags.map((flag) => (
+                      <Flag key={flag} title={FLAG_TEXT[flag]}>{flag}</Flag>
+                    ))}
+                    {slide.issue && <Flag title={slide.issue.message}>{slide.issue.reason}</Flag>}
+                  </div>
+                </button>
               );
-            })}
-          </ul>
+            }}
+          </SlideGrid>
 
           <aside className="lg:sticky lg:top-6 lg:self-start">
             {selected === undefined
@@ -436,7 +474,7 @@ function SlidePanel(
           value={slide.layoutId}
           onChange={(event) => onLayout(event.target.value)}
           disabled={busy}
-          className="w-full rounded-md border border-line bg-white px-2.5 py-1.5 text-sm disabled:opacity-50"
+          className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm disabled:opacity-50"
         >
           {layouts.map((l) => (
             <option key={l.id} value={l.id}>{l.displayName}</option>

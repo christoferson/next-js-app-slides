@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { GET as listBrands, POST as createBrand } from "@/app/api/brands/route";
 import { DELETE as deleteBrand, GET as getBrand, PUT as putBrand } from "@/app/api/brands/[brandId]/route";
 import { POST as importBrand } from "@/app/api/brands/import/route";
+import { PUT as importIntoBrand } from "@/app/api/brands/[brandId]/import/route";
 import { POST as uploadAsset } from "@/app/api/brands/[brandId]/assets/route";
 import { DELETE as deleteAsset } from "@/app/api/brands/[brandId]/assets/[assetId]/route";
 import { GET as serveAsset } from "@/app/api/assets/[assetId]/route";
@@ -108,17 +109,44 @@ describe("GET /api/brands", () => {
 });
 
 describe("GET | PUT | DELETE /api/brands/:brandId", () => {
-  it("GET returns brand + compiled tokens in one response", async () => {
+  it("GET returns brand + compiled tokens + resolved templates in one response", async () => {
     const h = routeHarness();
     const brand = await seedBrand(h);
-    const { status, body } = await readBody<{ brand: BrandDefinition; tokens: Record<string, unknown> }>(
-      await getBrand(req("GET"), h.ctx({ brandId: brand.id })),
-    );
+    const { status, body } = await readBody<{
+      brand: BrandDefinition; tokens: Record<string, unknown>; templates: { layoutId: string }[];
+    }>(await getBrand(req("GET"), h.ctx({ brandId: brand.id })));
 
     expect(status).toBe(200);
     expect(body.brand.id).toBe(brand.id);
-    // Both in one payload, so the preview cannot show repaired colours for a different revision.
+    // All three in one payload, so the editor's preview cannot show repaired colours, zones, and a
+    // letterbox badge that each describe a different revision of the brand.
     expect(body.tokens).toBeTruthy();
+    // A brand with no uploaded background has nothing to resolve — the field is still present, so the
+    // client never has to distinguish "none" from "this deployment doesn't send them".
+    expect(body.templates).toEqual([]);
+  });
+
+  it("GET resolves a template per TEMPLATED layout, carrying the facts only the server has (§12)", async () => {
+    const h = routeHarness();
+    const brand = await seedBrand(h);
+    // 4:3, so the letterbox badge's own input is exercised rather than just its presence.
+    await uploadAsset(
+      uploadReq(
+        { bytes: pngOfSize(800, 600), filename: "bg.png", type: "image/png" },
+        { kind: "background", layoutId: "title" },
+      ),
+      h.ctx({ brandId: brand.id }),
+    );
+
+    const { body } = await readBody<{
+      templates: { layoutId: string; backgroundSize?: { width: number; height: number } }[];
+    }>(await getBrand(req("GET"), h.ctx({ brandId: brand.id })));
+
+    expect(body.templates.map((t) => t.layoutId)).toEqual(["title"]);
+    // The browser cannot read intrinsic pixels out of a CSS background image, so `placeBackground` —
+    // which decides letterboxing from exactly these numbers (§1.1/C2) — could not run client-side
+    // without them. Taken from the BYTES, not from what the upload claimed.
+    expect(body.templates[0]?.backgroundSize).toEqual({ width: 800, height: 600 });
   });
 
   it("GET a missing brand is 404 and never echoes the id", async () => {
@@ -198,6 +226,82 @@ describe("POST /api/brands/import", () => {
     expect(body.issues?.length).toBeGreaterThan(0);
 
     // "Nothing partially applied" is the SPEC §12 promise, and this is the observable form of it.
+    const { body: list } = await readBody<{ brands: unknown[] }>(await listBrands(req("GET")));
+    expect(list.brands).toHaveLength(0);
+  });
+});
+
+describe("PUT /api/brands/:brandId/import", () => {
+  it("round-trips an EXPORTED config, identity keys and all (§11 step 3)", async () => {
+    const h = routeHarness();
+    const brand = await seedBrand(h);
+    h.clock.tick();
+
+    // The whole reason this endpoint exists rather than `PUT /api/brands/:id`: an export carries `id`,
+    // `userId`, `createdAt` and `updatedAt`, which `brandInputSchema`'s `strictObject` rejects as four
+    // unrecognized keys — a confusing 400 for a file this app itself produced.
+    const { status, body } = await readBody<BrandDefinition>(
+      await importIntoBrand(req("PUT", { ...brand, name: "Reimported" }), h.ctx({ brandId: brand.id })),
+    );
+
+    expect(status).toBe(200);
+    expect(body.id).toBe(brand.id);
+    expect(body.name).toBe("Reimported");
+    expect(body.createdAt).toBe(brand.createdAt);
+  });
+
+  it("replaces the brand in the PATH, never the one the payload names", async () => {
+    const h = routeHarness();
+    const target = await seedBrand(h, { name: "Target" });
+    const bystander = await seedBrand(h, { name: "Bystander" });
+
+    // A config claiming the OTHER brand's id and another user's `userId`. Honouring either would be a
+    // straight authorization hole: the repository scopes by its argument, not by the body.
+    await importIntoBrand(
+      req("PUT", { ...bystander, id: bystander.id, userId: "someone-else", name: "Overwritten" }),
+      h.ctx({ brandId: target.id }),
+    );
+
+    const { body: hit } = await readBody<{ brand: BrandDefinition }>(
+      await getBrand(req("GET"), h.ctx({ brandId: target.id })),
+    );
+    const { body: missed } = await readBody<{ brand: BrandDefinition }>(
+      await getBrand(req("GET"), h.ctx({ brandId: bystander.id })),
+    );
+
+    expect(hit.brand.name).toBe("Overwritten");
+    expect(hit.brand.userId).toBe(target.userId);
+    expect(hit.brand.userId).not.toBe("someone-else");
+    // The brand the payload named is untouched — the path is the only thing that targets a write.
+    expect(missed.brand.name).toBe("Bystander");
+  });
+
+  it("reports invalid config with field-level issues and applies nothing (§12)", async () => {
+    const h = routeHarness();
+    const brand = await seedBrand(h, { name: "Intact" });
+
+    const { status, body } = await readError(
+      await importIntoBrand(req("PUT", { ...brand, colors: {} }), h.ctx({ brandId: brand.id })),
+    );
+
+    expect(status).toBe(400);
+    expect(body.code).toBe("InvalidBrandConfig");
+    expect(body.issues?.length).toBeGreaterThan(0);
+
+    const { body: after } = await readBody<{ brand: BrandDefinition }>(
+      await getBrand(req("GET"), h.ctx({ brandId: brand.id })),
+    );
+    expect(after.brand.name).toBe("Intact");
+  });
+
+  it("is 404 on an unknown brand rather than creating one at that id", async () => {
+    const h = routeHarness();
+    const { status, body } = await readError(
+      await importIntoBrand(req("PUT", brandInput()), h.ctx({ brandId: "brand-nope" })),
+    );
+
+    expect(status).toBe(404);
+    expect(body.code).toBe("BrandNotFound");
     const { body: list } = await readBody<{ brands: unknown[] }>(await listBrands(req("GET")));
     expect(list.brands).toHaveLength(0);
   });

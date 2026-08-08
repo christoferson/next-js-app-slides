@@ -147,8 +147,19 @@ export const api = {
       request<T>(`/api/brands/${encodeURIComponent(brandId)}`, { method: "PUT", body: json(body) }),
     remove: (brandId: string) =>
       request<void>(`/api/brands/${encodeURIComponent(brandId)}`, { method: "DELETE" }),
-    /** Raw JSON import (§12) — its zod failures arrive as `ApiError.issues`. */
+    /** Raw JSON import that CREATES a new brand (§12) — zod failures arrive as `ApiError.issues`. */
     import: <T>(body: unknown) => request<T>("/api/brands/import", { method: "POST", body: json(body) }),
+    /**
+     * Raw JSON import that REPLACES this brand.
+     *
+     * A separate method rather than an optional `brandId` on `import`, because the two hit different
+     * routes with different verbs — and because "create from this file" and "overwrite the brand I have
+     * open with this file" are decisions the user makes explicitly, not a parameter to be defaulted.
+     */
+    importInto: <T>(brandId: string, body: unknown) =>
+      request<T>(`/api/brands/${encodeURIComponent(brandId)}/import`, {
+        method: "PUT", body: json(body),
+      }),
 
     /**
      * Asset upload. `FormData`, so `request` leaves the multipart boundary to the browser.

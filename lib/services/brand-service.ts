@@ -91,6 +91,19 @@ export interface ResolvedTemplate {
    * be decoded; every consumer treats absence as "no information" and leaves the tokens alone.
    */
   backgroundLuminance?: number;
+  /**
+   * The background image's intrinsic pixel size, when its bytes carried one.
+   *
+   * Carried for the same reason as `backgroundLuminance`, for a different §12 badge: the letterbox warning.
+   * `placeBackground` decides letterboxing from the INTRINSIC size (§1.1/C2 — deriving it from the declared
+   * box is the mistake that library's `sizing` makes), and the browser cannot read pixel dimensions out of a
+   * CSS background image. Without this number the brand editor could only warn about a 4:3 upload *after*
+   * an export had already been produced, which is the wrong end of §8's letterbox path.
+   *
+   * A pair or nothing, deliberately: `AssetMeta` types `width`/`height` independently optional, but a lone
+   * dimension answers no question any consumer asks — every one of them needs an aspect ratio.
+   */
+  backgroundSize?: { width: number; height: number };
 }
 
 export class BrandService {
@@ -155,29 +168,38 @@ export class BrandService {
       zones: plan.zones,
       zonesCustomized: plan.zonesCustomized,
       ...(plan.backgroundAssetId !== undefined ? { backgroundAssetId: plan.backgroundAssetId } : {}),
-      ...(await this.backgroundLuminance(userId, plan.backgroundAssetId)),
+      ...(await this.backgroundFacts(userId, plan.backgroundAssetId)),
     };
   }
 
   /**
-   * The background's sampled luminance, for `ResolvedTemplate` — metadata only, never the bytes.
+   * The background's sampled luminance and intrinsic size, for `ResolvedTemplate` — metadata only, never
+   * the bytes.
    *
-   * `withBytes` is left off (the port's default), so this is a metadata read: the preview needs one number
-   * and loading a multi-megabyte image server-side to hand it over would make every workspace load pay for
-   * a decode it does not use.
+   * `withBytes` is left off (the port's default), so this is a metadata read: the client needs three
+   * numbers, and loading a multi-megabyte image server-side to hand them over would make every workspace
+   * load pay for a decode it does not use. Both facts come from ONE `resolve` — they are properties of the
+   * same record, and a second call per template would double the IO of a workspace read for nothing.
    *
    * A missing asset yields `{}` rather than throwing. The reason is the same one `resolveOrSkip` gives on
-   * the render path: this value only nudges a text colour, so an asset whose record has gone means "no
-   * information", and failing a whole workspace load over a cosmetic hint would turn a degraded preview
-   * into no preview at all.
+   * the render path: these values only nudge a text colour and raise a warning badge, so an asset whose
+   * record has gone means "no information", and failing a whole workspace load over a cosmetic hint would
+   * turn a degraded preview into no preview at all.
    */
-  private async backgroundLuminance(
+  private async backgroundFacts(
     userId: string, assetId: string | undefined,
-  ): Promise<{ backgroundLuminance?: number }> {
+  ): Promise<{ backgroundLuminance?: number; backgroundSize?: { width: number; height: number } }> {
     if (assetId === undefined) return {};
     try {
       const asset = await this.deps.assets.resolve(userId, assetId);
-      return asset.luminance !== undefined ? { backgroundLuminance: asset.luminance } : {};
+      return {
+        ...(asset.luminance !== undefined ? { backgroundLuminance: asset.luminance } : {}),
+        // Both or neither — see `ResolvedTemplate.backgroundSize`. SVG legitimately has neither, and the
+        // exporter already treats a dimensionless asset as full-bleed rather than letterboxed.
+        ...(asset.width !== undefined && asset.height !== undefined
+          ? { backgroundSize: { width: asset.width, height: asset.height } }
+          : {}),
+      };
     } catch {
       return {};
     }

@@ -147,6 +147,33 @@ describe("StudioFacade — orchestration across services", () => {
     await expect(h.facade.getDeck(h.headers, deck.id)).resolves.toMatchObject({ brandId: brand.id });
   });
 
+  it("getBrandTheme composes brand, tokens and templates for exactly the TEMPLATED layouts", async () => {
+    const h = harness();
+    const brand = await h.facade.createBrand(h.headers, brandInput());
+
+    // No background yet: nothing to resolve, and the field is still present so the editor never has to
+    // distinguish "this brand has no templates" from "this deployment doesn't send them".
+    await expect(h.facade.getBrandTheme(h.headers, brand.id))
+      .resolves.toMatchObject({ templates: [] });
+
+    await h.facade.addBrandAsset(h.headers, brand.id, BYTES, {
+      filename: "bg.png", kind: "background", layoutId: "title", width: 800, height: 600,
+    });
+    const view = await h.facade.getBrandTheme(h.headers, brand.id);
+
+    // Narrowed by the SHARED `templatedLayoutIds` rule, not a local filter — a second copy here could
+    // disagree with the resolver about the very brand it is resolving. Customizing zones without a
+    // background is deliberately not "templated": `resolveRenderPlan` says so, so this must too.
+    expect(view.templates.map((t) => t.layoutId)).toEqual(["title"]);
+    expect(view.templates.length).toBeLessThan(LAYOUTS.length);
+    expect(view.templates[0]?.mode).toBe("templated");
+    // The §12 letterbox badge's input, which a browser cannot derive from a CSS background image.
+    expect(view.templates[0]?.backgroundSize).toEqual({ width: 800, height: 600 });
+    // One revision, three parts: the brand carried alongside is the one the tokens were compiled from.
+    expect(view.brand.id).toBe(brand.id);
+    expect(view.brand.templates["title"]?.backgroundAssetId).toBe(view.templates[0]?.backgroundAssetId);
+  });
+
   it("workspace composes deck, slides, brand, tokens and templates in one call", async () => {
     const { h, brand, deck } = await deckWithBrand();
     await generate(h, deck.id);

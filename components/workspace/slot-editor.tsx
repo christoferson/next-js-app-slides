@@ -97,7 +97,7 @@ function SlotField(
             value={typeof value === "string" ? value : ""}
             onChange={(event) => onChange(event.target.value)}
             disabled={disabled}
-            className="w-full resize-y rounded-md border border-line bg-white px-2.5 py-1.5 text-sm text-ink disabled:opacity-50"
+            className="w-full resize-y rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink disabled:opacity-50"
             placeholder={spec.description}
           />
         )}
@@ -143,7 +143,7 @@ function ListInput(
             value={item}
             onChange={(event) => replace(index, event.target.value)}
             disabled={disabled}
-            className="w-full resize-y rounded-md border border-line bg-white px-2.5 py-1.5 text-sm text-ink disabled:opacity-50"
+            className="w-full resize-y rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink disabled:opacity-50"
           />
           <span className="w-14 shrink-0 pt-2 text-right text-[11px] text-ink-soft/70">
             <Counter used={item.length} budget={itemBudget} />

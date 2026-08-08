@@ -167,7 +167,7 @@ function BriefingForm(
           rows={8}
           value={draft.sourceText ?? ""}
           onChange={(event) => setField("sourceText", event.target.value)}
-          className="w-full resize-y rounded-md border border-line bg-white px-2.5 py-1.5 text-sm text-ink"
+          className="w-full resize-y rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink"
           placeholder="Paste anything the deck should be grounded in."
         />
       </Field>

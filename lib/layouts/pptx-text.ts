@@ -65,8 +65,15 @@ export function addZoneText(
 }
 
 export interface BulletOptions {
-  /** `"number"` renders 1./2./3. instead of a glyph. */
-  type?: "bullet" | "number";
+  /**
+   * `"number"` renders 1./2./3. instead of a glyph; `"none"` renders no marker at all.
+   *
+   * `"none"` must be stated explicitly rather than expressed by omitting `type`. Omission means
+   * "caller didn't say", and pptxgenjs's default for an unset `bullet` is *no marker* — so the two
+   * would silently mean the same thing, and the one call site that genuinely wanted markerless
+   * (`SlotPaint.marker: "none"`) got bullets instead. See `bulletRuns` for the defect.
+   */
+  type?: "bullet" | "number" | "none";
   /** 0-based nesting. Uniform across items in v1; the seed layouts are all flat. */
   indentLevel?: number;
 }
@@ -81,6 +88,20 @@ export interface BulletOptions {
  * item its own 1-based position makes every paragraph's declared start match where it actually is.
  * Both directions verified in `scripts/verify-pptx-numbering.ts`; the empty-item filter runs BEFORE
  * numbering so a blank entry cannot leave a gap in the sequence.
+ *
+ * ## `type: "none"` — a §8 divergence that shipped in shared code
+ *
+ * `SlotPaint.marker` has offered `"none"` since it was written, and the preview honoured it
+ * (`listStyleType: "none"`). This function did not: `paintPptx` passed `{}` for that case, which fell
+ * into the `bullet: true` default below, so a markerless list previewed clean and **exported with
+ * bullets**. It went unnoticed because no seed layout used the value — the §10 checklist layout is the
+ * first, which is how it surfaced.
+ *
+ * `bullet: false` is the fix, verified against pptxgenjs 4.0.1 in
+ * `scripts/verify-pptx-bullet-none.ts`: 3 items → 3 paragraphs, `buChar=0`, and an explicit
+ * `<a:buNone/>` per paragraph (OOXML's own way of saying "no marker"). The probe also re-confirms that
+ * `breakLine` stays MANDATORY here — dropping it collapsed the same three items into one paragraph
+ * even with no bullet, so C5 is about `align`, not about bullets, and applies to every list we write.
  */
 export function bulletRuns(
   items: readonly string[], options: BulletOptions = {},
@@ -93,7 +114,8 @@ export function bulletRuns(
       options: {
         bullet: options.type === "number"
           ? { type: "number" as const, numberStartAt: index + 1 }
-          : true,
+          // Explicitly `false` for "none" — pptxgenjs then writes `<a:buNone/>`. Verified, not assumed.
+          : options.type !== "none",
         // MANDATORY. Without it a shape-level `align` collapses every item into one paragraph.
         breakLine: true,
         ...(options.indentLevel === undefined ? {} : { indentLevel: options.indentLevel }),

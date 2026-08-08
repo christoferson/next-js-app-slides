@@ -219,7 +219,20 @@ class SlideTarget implements PptxTarget {
 function assertBulletParagraphs(
   context: string, runs: readonly PptxTextRun[], options: PptxTextOptions,
 ): void {
-  const bulleted = runs.filter((run) => run.options?.bullet !== undefined && run.options.bullet !== false);
+  /*
+   * `bullet !== undefined` — INCLUDING `bullet: false`.
+   *
+   * This filter used to exclude `false`, which was harmless only because nothing produced it. Once
+   * `marker: "none"` began emitting `bullet: false` (see `bulletRuns`), that exclusion would have
+   * silently exempted every markerless list from the backstop — and the collapse does NOT depend on
+   * bullets: `scripts/verify-pptx-bullet-none.ts` variant D shows three markerless runs without
+   * `breakLine` serializing as ONE paragraph, exactly as bulleted ones do. C5 is a property of the
+   * shape-level `align`, so the guard must cover every list we write, marker or not.
+   *
+   * A run with no `bullet` key at all is not a list item (nothing constructs one today; inline rich
+   * text would look like that) and is deliberately still out of scope.
+   */
+  const bulleted = runs.filter((run) => run.options?.bullet !== undefined);
   if (bulleted.length === 0) return;
 
   const withBreak = bulleted.filter((run) => run.options?.breakLine === true);

@@ -33,7 +33,16 @@ import { SlideFrame } from "@/lib/layouts/preview";
 import type { BrandDefinition } from "@/lib/brand/types";
 
 export interface SlidePreviewProps {
-  brand: BrandDefinition;
+  /**
+   * Only the templates, which is all `resolveZones` reads.
+   *
+   * Narrowed deliberately: the brand editor previews an UNSAVED draft — that is what makes a zone edit
+   * appear immediately (§12) — and a draft has no `id`, `userId`, or timestamps. Asking for the full
+   * definition would force that screen to cast a draft into one, putting a type lie at the exact call
+   * site §8 is written about. It also documents the real contract: appearance comes from `tokens`, never
+   * from the brand (`lib/brand/types.ts`).
+   */
+  brand: Pick<BrandDefinition, "templates">;
   tokens: DesignTokens;
   layoutId: string;
   slots: SlotValues;
@@ -68,7 +77,7 @@ export function SlidePreview({ brand, tokens, layoutId, slots, background }: Sli
   if (!layout || !args) {
     return (
       <div
-        className="flex aspect-video w-full items-center justify-center rounded border border-line bg-white p-4 text-center text-sm text-ink-soft"
+        className="flex aspect-video w-full items-center justify-center rounded border border-line bg-surface p-4 text-center text-sm text-ink-soft"
         role="img"
         aria-label={`Slide cannot be previewed: unknown layout ${layoutId}`}
       >

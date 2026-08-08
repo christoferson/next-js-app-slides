@@ -141,10 +141,12 @@ export function paintPptx(
 
     const value = slots[paint.slotKey];
     if (isListSlot(value)) {
-      const marker = paint.marker ?? "bullet";
+      // The marker is passed through verbatim, including `"none"`. It used to send `{}` for that case,
+      // which `bulletRuns` read as "unspecified" and defaulted to bullets — so a markerless list
+      // exported with bullets while previewing without them (§8). `BulletOptions.type` now carries
+      // `"none"` as a real value so the two renderers cannot disagree again.
       listParagraphs[paint.slotKey] = addZoneBullets(
-        target, zone, value, style,
-        marker === "none" ? {} : { type: marker === "number" ? "number" : "bullet" },
+        target, zone, value, style, { type: paint.marker ?? "bullet" },
       );
       continue;
     }

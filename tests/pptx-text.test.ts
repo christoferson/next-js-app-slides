@@ -103,6 +103,28 @@ describe("C5 — breakLine on every bullet run", () => {
   it("omits indentLevel entirely when unset, rather than sending 0", () => {
     expect(bulletRuns(["a"])[0]?.options).not.toHaveProperty("indentLevel");
   });
+
+  it("suppresses the marker for type:'none' — while keeping one paragraph per item", () => {
+    /*
+     * The §8 defect this pair of assertions locks down. `SlotPaint.marker` always offered `"none"` and
+     * the preview honoured it, but `paintPptx` sent `{}`, which fell into the `bullet: true` default —
+     * so a markerless list previewed clean and exported with bullets. No seed layout used the value,
+     * so nothing failed.
+     *
+     * `bullet: false` (not omission) is what pptxgenjs turns into `<a:buNone/>`; verified against
+     * 4.0.1 in `scripts/verify-pptx-bullet-none.ts`, which also showed the collapse still happens
+     * without `breakLine` even when there is no bullet — C5 is about `align`, not about markers.
+     */
+    const runs = bulletRuns(["one", "two", "three"], { type: "none" });
+    expect(runs.map((r) => r.options?.bullet)).toEqual([false, false, false]);
+    for (const run of runs) expect(run.options?.breakLine).toBe(true);
+  });
+
+  it("still bullets when no type is given, so the default is unchanged", () => {
+    // The other half of the fix: `"none"` had to become an explicit value rather than being expressed
+    // by omission, because omission is what every existing caller of a bulleted list already does.
+    expect(bulletRuns(["a"])[0]?.options?.bullet).toBe(true);
+  });
 });
 
 describe("addZoneBullets", () => {

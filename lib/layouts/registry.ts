@@ -40,6 +40,7 @@ import { twoColumnLayout } from "@/lib/layouts/defs/two-column";
 import { quoteLayout } from "@/lib/layouts/defs/quote";
 import { statsLayout } from "@/lib/layouts/defs/stats";
 import { closingLayout } from "@/lib/layouts/defs/closing";
+import { checklistLayout } from "@/lib/layouts/defs/checklist";
 
 /** The seed set (SPEC §6). One line per layout — that is the whole extension mechanism. */
 export const LAYOUTS: readonly SlideLayout[] = [
@@ -51,6 +52,11 @@ export const LAYOUTS: readonly SlideLayout[] = [
   quoteLayout,
   statsLayout,
   closingLayout,
+  // Appended, not inserted: `intentMatchRule` takes the FIRST layout claiming a hint, so position in
+  // this array is a precedence declaration. `checklist` claims `list`, which `bullets` claims too —
+  // appending leaves every existing mapping decision exactly as it was (CLAUDE.md §10's proof must not
+  // silently re-route decks that generate today).
+  checklistLayout,
 ];
 
 /**

@@ -2043,12 +2043,353 @@ re-initializes the draft from the server's copy instead of being typed back over
 
 ### Still open
 
-- **Screens not yet built**: `/brands/[brandId]` editor (zone table + live preview, asset upload, JSON
-  import/export), the outline editor (`outlineView`/`saveOutline`/`setSlideLayout` are wired server-side and
-  unused by any UI — hence the 404 above), `@dnd-kit` slide reorder, `next-themes` provider.
+- **Screens not yet built**: `@dnd-kit` slide reorder, `next-themes` provider. (`/brands/[brandId]` was the
+  last 404 and is now built — see part 3 below.)
 - **§12 notes needing those screens**: zone-table edits reflecting immediately in the preview; the letterbox
   warning; the `contrast-repaired` amber badge (`unreadableOverBackground` is called by the workspace now, so
-  that one is no longer unused).
+  that one is no longer unused). — **all three closed in part 3.**
 - **§10's one-file layout proof** (`checklist` + one registry line, then `git diff --stat`).
 - Deferred/flagged, unchanged: desktop PowerPoint open-test (⚠️ VERIFY #5 — deferred, not waived),
+  `AVG_ADVANCE_EM` per-face metrics (⚠️ VERIFY #6), Docker smoke (skipped by user decision).
+
+---
+
+## §2 step 16 (part 2) — the outline editor, and three dead client methods (2026-08-07)
+
+`/decks/:id/outline` existed as a 404 with its entire server side built and unused. It is now
+`app/decks/[deckId]/outline/page.tsx`. Building it surfaced a **whole bug class with no test coverage**,
+which turned out to be the more valuable half of this step.
+
+### Three client methods pointed at verbs their routes do not export
+
+`lib/client/api.ts` encodes two facts per route — path and verb — and **nothing checked either**. Three of
+its methods sent a verb the route refuses:
+
+| client method | sent | route exports | effect |
+|---|---|---|---|
+| `decks.setSlideLayout` | `PATCH` | `PUT` only | 405 |
+| `brands.update` | `PATCH` | `GET`/`PUT`/`DELETE` | 405 |
+| `decks.reorderSlides` | `PATCH` | `PUT` only | 405 |
+
+All three routes document `PUT` as deliberate (replace semantics, whole-permutation bodies), so the client
+was wrong in every case and was corrected. **Why no existing test caught this:** route tests import the
+handler and invoke it directly, so they never construct a URL or choose a verb; `scripts/smoke.ts` calls
+`PUT …/layout` with a hand-written path, bypassing the client entirely. The two layers that must agree were
+each fully tested in isolation, and the seam between them was untested. `setSlideLayout` was found only by
+writing the first screen to use it — the other two were still latent, and `brands.update` would have broken
+the brand editor on its first save.
+
+`tests/client-contract.test.ts` closes it: every client method is invoked against a stubbed `fetch`, the
+recorded URL is resolved against `app/api/**` **on disk** (Next.js file routing, so the filesystem is the
+route table, with literal-beats-param specificity mirrored), and the matched `route.ts` is read for its
+exported verbs. Deliberately **not** a table of expected paths — that would be §4's parallel table in test
+form, agreeing with whatever the client currently sends. A coverage assertion enumerates `api`'s methods
+reflectively, so a new method cannot be added without declaring how it is called. Also asserted: id
+escaping (`api.decks.get("../../brands/b1")` stays one path segment) and the content-type rules, including
+that FormData uploads must NOT get a JSON content-type — overriding it strips the multipart boundary.
+
+### `MappingPreviewRow.options` — the picker's ranking moved server-side
+
+`LayoutMappingService.layoutOptionsFor` existed, was tested, and was **reachable from nothing but tests**.
+The picker needs intent-ranked options with a recommendation; ranking them in the page would have been §4's
+parallel table, and its "recommended" would drift from the badge's `reason` the moment a layout claimed a
+new intent. `preview()` now carries `options` per row — per-row because the order depends on that slide's
+`visualHint`.
+
+### Editor design decisions worth recording
+
+- **Two write paths, not one.** Text edits accumulate in a local draft → `PATCH` the whole document (the
+  server's zod is the authority on shape). A layout pin is a single click → the targeted
+  `PUT …/sections/:si/slides/:li/layout`, per that route's lost-update reasoning.
+- **The pin is disabled while a draft exists**, and says why. The write is by INDEX, so an unsaved reorder
+  means the position clicked is not the position the server would write. Silently pinning the wrong slide
+  was the alternative.
+- **Mapping badges are hidden while a draft exists** for the same reason: `preview` is indexed by the
+  server's document. A badge explaining a different slide is worse than no badge.
+- **Draft is `Outline | undefined`, not a copy + dirty flag** — the flag can disagree with the contents.
+- `byPosition` joins the flat `preview` to the nested sections by walking the same outline the rows were
+  computed from; matching on `question` text would break on two slides asking the same thing.
+- A `DeckNotReady` load failure renders "no outline yet" with a link, not a Retry — retrying the same GET
+  returns the same 409 forever.
+
+### Live verification (deck `01KZDKSHGWTFF5V8N7E1HWGVR3`, real Bedrock)
+
+| check | result |
+|---|---|
+| `GET /outline` | 3 sections / 6 slides, 6 preview rows, 8 options/row, exactly 1 recommended |
+| Page HTTP | 200; `/decks/[deckId]/outline` in the production route table |
+| `PUT` pin `quote` on 0.1 | 200 → badge flips to `user-override` / "You chose this layout" |
+| `PUT` pin `bulletts` | **400 `UnknownLayout`** — reported, not silently dropped |
+| `PUT` pin `null` | 200 → `layoutOverride` key absent entirely, badge back to `intent-match` |
+| `PATCH` reword + reorder | 200, both persisted |
+| `PATCH` blank message | **400 `InvalidRequest`**, issue `"sections.0.slides.0.message": message must not be empty` — the field path `ErrorNote` lists |
+| `PATCH` with an unknown pin | 400 `UnknownLayout` (the whole-document path validates pins too) |
+| `POST {sectionIndex:1, instruction}` | 200, `repaired: false`; section 1 rewritten ("costs before it pays", "what do we actually trade?"), sections 0 and 2 **byte-identical** |
+| `DEBUG_PROMPTS` on that call | `outline-section: clean (2659 chars)` — §7 holds on a **user-supplied instruction**, the one input that could carry a hex or font name into a prompt |
+
+**Client-bundle check for the new route.** Both pages are client components, so SSR HTML is only a loading
+shell — grepping it would have been a false negative (and was, on the first attempt). Fetched all 17 script
+tags for the route and searched the concatenated 3.9 MB alongside the flight payload: all 13 control strings
+present (including the pin's `"PUT"`), and `@aws-sdk`, `pptxgenjs`, `AWS_PROFILE`, the profile name, and the
+account number all **absent**. No DOM/browser tooling was added to check this — the prior session's two
+production crashes from devDependency additions made that the wrong trade for one assertion.
+
+`npm run verify` green: **35 files / 1132 tests**. `npm run build` passes.
+
+---
+
+## §2 step 16 (part 3) — the brand editor, and the three §12 badges it finally makes real (2026-08-07)
+
+`/brands/:brandId` was the last 404 the gallery linked to. It is now `app/brands/[brandId]/page.tsx`:
+name/colours/fonts/tone, the per-layout numeric zone table with its live preview, logo + background upload,
+and JSON export/import. This is the screen §8 and §12 were written about, and building it needed **three
+server-side gaps closed first** — none of which could be worked around in the page without introducing the
+exact divergence those sections exist to prevent.
+
+### The letterbox warning had no data path to the client
+
+§12 requires "upload a 4:3 background → preview shows the letterbox warning". `placeBackground` decides
+letterboxing from **intrinsic pixel dimensions** — deriving it from the declared box is precisely the
+pptxgenjs bug recorded as C2 — and a browser cannot read pixel dimensions out of a CSS `background-image`.
+So the number has to come from the server or the badge cannot exist. `ResolvedTemplate` already carried
+`backgroundLuminance` for the analogous text-colour problem, so `backgroundSize` follows that precedent:
+typed as a `{width, height}` **pair** (a lone dimension answers no question — every consumer needs an aspect
+ratio), and read from the *same* `assets.resolve` call, since a second call per template would double a
+workspace read's IO. The private `backgroundLuminance()` helper became `backgroundFacts()`.
+
+### `GET /api/brands/:id` now returns brand + tokens + resolved templates
+
+The facade had `resolveTemplate` and **no route exposed it**. The editor's alternative was N requests (one
+per templated layout) or resolving zones itself — the second being the §8 divergence the shared resolver
+exists to prevent. `getBrandTheme` now composes all three, for the reason its own doc already gave for
+bundling tokens: `compileTheme` runs contrast repair, so separately-fetched parts can describe *different
+revisions*, and a preview whose letterbox badge came from one revision while its zones came from another is
+worse than no badge. Narrowed to **templated** layouts via the shared `templatedLayoutIds` — the facade's one
+non-type import outside `services`/`errors`, deliberately, because a local `Object.entries(...).filter(...)`
+could disagree with the resolver about the very brand it is resolving.
+
+### A documented route did not exist
+
+`POST /api/brands/import`'s header promises `PUT /api/brands/:brandId/import` for the replace case. It was
+never written. Without it the editor's import would have to POST a *create* and then delete the original, or
+send an export through `PUT /api/brands/:brandId` — which rejects the four identity keys (`id`, `userId`,
+`createdAt`, `updatedAt`) an export carries, a confusing 400 for a file this app produced. No facade or
+service change was needed: `importBrand(headers, input, brandId?)` already took the optional target.
+
+### Two type lies removed rather than cast around
+
+The page first passed a draft brand to `SlidePreview` and a `LayoutSummary` to `resolveZones` via `as`. Both
+casts were the type system telling the truth: those functions over-declared their parameters. `resolveZones`
+now takes `Pick<SlideLayout, "id" | "defaultZones">` and `SlidePreview.brand` takes
+`Pick<BrandDefinition, "templates">` — which is all either ever read. This matters beyond tidiness: the
+editor previews an **unsaved draft** (that is what makes a zone edit appear immediately), and a draft has no
+`id` or timestamps. A cast at the one call site §8 is written about is where a later real mismatch would hide.
+
+### Placeholder preview content is generated, never tabled
+
+The editor previews layouts with no deck behind them. A `{title: "Your title here"}` table would be §4's
+parallel table and would break §10's one-file-layout proof — a new layout would preview empty. `lib/layouts/
+sample-content.ts` derives text from each `SlotSpec`'s own key, type, and budgets instead. Filled to ~70% of
+`maxChars`, not three words: §1.1/C1 means nothing shrinks to fit, so a slightly-too-small zone *clips*, and
+the preview must show the case the export has to survive. Not 100% either — that is
+`scripts/export-fixture-deck.ts`'s job; this is a surface someone reads while dragging numbers.
+
+### Editor design decisions worth recording
+
+- **Zone bounds are marked, not clamped.** `slotZoneSchema` owns `x + w ≤ 100` (issue on `w`). A client
+  clamp would be a second, subtly different implementation *and* would fight the user mid-edit — typing
+  `w: 60` into a zone at `x: 50` has to be possible on the way to moving `x`. Overflowing cells go amber
+  with `aria-invalid`; the server's own message lands on save.
+- **The first zone edit persists the whole resolved list.** A brand template *replaces* `defaultZones`
+  wholesale (never merges), so writing back only the changed row would save a partial template that
+  `crossCheck` correctly rejects for missing a required slot's zone.
+- **"Reset to defaults" deletes the template key**, not its `zones`. An empty array validates as a template
+  positioning nothing and is then rejected for missing every required zone, while `resolveZones` treats
+  zero-length as uncustomized anyway. A background, if present, is preserved — resetting positions is not
+  the same request as detaching an image.
+- **Upload saves the draft first.** `addAsset` attaches server-side and seeds zones from `defaultZones`, so
+  the reload afterwards would silently discard unsaved edits.
+- **Save reloads rather than trusting its own response**, because the save changes `tokens` (contrast
+  repair) and what `resolveTemplate` reports; §8's whole point is that those travel together.
+- **A gated font stays in the picker as a disabled option** showing its `note`. Gating is a picker policy,
+  not a validity rule; omitting it would silently reset the user's font the moment they touched anything.
+- **Orphan zones are shown, last, badged** rather than hidden — `crossCheck` rejects them on save, so
+  hiding one would make that error unexplainable.
+- Export shows the **saved** brand, not the draft: the round-trip guarantee is about what the server stored.
+- `contain` is applied to the preview background **only when actually letterboxed**, because
+  `placeBackground` snaps near-16:9 to full-bleed and a `contain` preview would show bars the export has not.
+
+### Live verification (brand `01KZE4HXRQXPNHYMKDFAJDM4J8`, dev server)
+
+| check | result |
+|---|---|
+| `GET /api/brands/:id` (no background) | keys `brand`/`tokens`/`templates`; `templates: []` — present-but-empty, so the client never distinguishes "none" from "not sent" |
+| `POST assets` 4:3 `bg-4x3.png` | 201; `templates` → 1 entry, `mode: "templated"`, zones seeded from `defaultZones` (`zonesCustomized: true`) |
+| `backgroundSize` | `{width: 800, height: 600}` — from the **bytes**, not the upload's claim |
+| `backgroundLuminance` | `0.0177` (the near-black fixture) |
+| `placeBackground(800×600)` | `letterboxed: true`, `x: 1.25, w: 7.5` — pillarboxed, centred, undistorted → the amber badge fires |
+| `unreadableOverBackground("111111", 0.0177)` | `true` → the background-contrast badge fires. `"FFFFFF"` → `false`, so it is not crying wolf |
+| Page HTTP | 200; `/brands/[brandId]` in the production route table |
+| Client chunks (17 tags, 4.0 MB) | all control strings present: `Reset to layout defaults`, `letterboxed`, `background contrast`, `not offered for new brands`, `runs past the edge of the slide`, `Show the saved config`, `Sent to the model`, and `sample-content`'s `WORDS` array |
+| `npm run verify:bundle` | **PASSED** — 19 production chunks, no `@aws-sdk`/`pptxgenjs`/`sharp`/`AWS_PROFILE` |
+
+**One note on the dev-chunk grep.** Searching the *dev* chunks finds the literal `pptxgenjs`, plus `addSlide`
+and `defineLayout` — all six occurrences are **doc-comment prose** (`"the §8 twin of PptxExporter.addSlide"`,
+C2's explanation of why `sizing` is unusable), which survives because dev builds do not strip comments. The
+library itself is absent: no `PptxGenJS` identifier, no `nodebuffer`. §12's grep targets the production
+bundle, which is what `verify:bundle` scans and what passed. Worth recording because the naive read of that
+output is a false positive, and the next person will hit it.
+
+### New tests
+
+- `tests/routes-brands.test.ts` — `GET` returns all three parts; a 4:3 upload's `backgroundSize` reaches the
+  client; and four cases for `PUT :id/import`: an **exported** config round-trips identity keys and all;
+  a payload naming *another brand's* `id` and another user's `userId` writes to the **path's** brand and
+  leaves the named one untouched; invalid config → 400 with issues and nothing applied; unknown brand → 404
+  rather than creating one at that id.
+- `tests/studio-facade.test.ts` — `getBrandTheme` resolves a template per *templated* layout (customized
+  zones without a background are deliberately not "templated"), carries `backgroundSize`, and returns the
+  brand the tokens were compiled from.
+- `tests/client-contract.test.ts` — `brands.importInto` declared, so the reflective coverage assertion holds.
+
+`npm run verify` green: **35 files / 1138 tests**. `npm run build` passes; `verify:bundle` passes.
+
+### Still open
+
+- **Screens**: `@dnd-kit` slide reorder, `next-themes` provider.
+- ~~§10's one-file layout proof~~ — **done**, see the section below.
+- Deferred/flagged, unchanged: desktop PowerPoint open-test (⚠️ VERIFY #5 — deferred, not waived),
+  `AVG_ADVANCE_EM` per-face metrics (⚠️ VERIFY #6), Docker smoke (skipped by user decision).
+
+## §10 one-file layout proof — **PASSED**, and it found a latent §8 defect (2026-08-08)
+
+§10 asks for a throwaway layout added as "one file in `/lib/layouts/defs` + one registry array line", with
+`git diff --stat` as the evidence and six consumers picking it up unedited. `checklist` (a title plus up to
+six checkbox items) is that layout, and it is kept rather than thrown away — readiness criteria and
+acceptance conditions are a real deck need, so the proof costs nothing to retain.
+
+### The diff
+
+```
+ lib/layouts/defs/checklist.tsx | (new file, 154 lines)
+ lib/layouts/registry.ts        |  6 ++++++     <- 1 import + 1 array entry + 4 lines of comment
+ tests/layout-registry.test.ts  | 33 ++++++--   <- see "the one test that failed", below
+```
+
+`tests/__artifacts__/layout-budgets.tsv` gained a row and then regenerated back to unmodified — proven
+*generated, not edited* by stashing the layout, re-running the budgets test, and observing the file return
+to clean. It is not a §10 leak.
+
+### The one test that failed — which is the useful result, not an obstacle
+
+Exactly **one** assertion in 1149 broke: `tests/layout-registry.test.ts`'s
+`expect(LAYOUTS.map(l => l.id)).toEqual(SEED_IDS)`. That is the finding. No *behaviour* anywhere depends on
+the registry's inventory — every other count in the suite derives from `LAYOUTS.length` — so a single frozen
+list was the whole cost of extending it. It was relaxed to a **prefix** assertion, which keeps both
+properties it actually protected (the seed layouts still exist; their ORDER is unchanged, and order is
+load-bearing because `intentMatchRule` takes the FIRST layout claiming a hint) while no longer requiring
+every future layout to edit a test. A `toEqual` on the full inventory is the parallel table §4 forbids,
+wearing a test's clothes. A duplicate-id test was added to recover the one property the relaxation dropped.
+
+### Reachability — all 16 checks, run against the real modules (`out/proof-checklist-reach.mjs`)
+
+| §10 consumer | result |
+|---|---|
+| `/api/registry/layouts` | present; 3 slots, 3 zones; JSON round-trips with no React/functions |
+| brand editor Templates section | `resolveZones({templates:{}})` seeds 3 zones, `customized=false`; every **required** slot positioned; `sampleSlots` fills all 3 |
+| mapping — declared intent | `list` → `[bullets, checklist]` |
+| mapping — user override | `layoutOverride` routes the slide, `rule=user-override` |
+| mapping — **non-perturbation** | `bullets` still wins `list` (first claimer), so no deck that generates today is re-routed |
+| generation — prompt | built from its slots; all 3 slot keys present |
+| generation — §7 purity | no hex, no coordinate tokens in the built prompt |
+| generation — validation | zod schema accepts valid slots, rejects a missing required slot |
+| workspace switcher | listed via `layoutSummaries()`; `registryLookup` reports its required keys |
+| PPTX export | 9-page fixture deck, **both** modes — rendered and looked at (below) |
+
+### The export was looked at, not just asserted
+
+`npm run verify:pptx:fixture:render` now emits **9** pages per deck. `out/render/fixture-token/page-09.png`
+and `fixture-templated/page-09.png` show six separate lines each prefixed `[ ]`, **no bullet glyphs**, and
+the accent rule clear of the wrapped title. Both C5 (one paragraph per item) and the markerless fix below
+are therefore confirmed by LibreOffice 26.2.5.2, not only by our XML assertions.
+
+### ⚠️ The proof surfaced a real §8 divergence in SHARED code
+
+`SlotPaint.marker` has always offered `"none"`, and `preview.tsx` honoured it (`listStyleType: none`).
+`paintPptx` did **not**: it passed `{}` to `addZoneBullets`, and `bulletRuns` defaults to `bullet: true`.
+A markerless list therefore **previewed clean and exported with bullets** — precisely the preview/export
+divergence §8 exists to prevent. It shipped undetected because no seed layout used the value; `checklist`
+is the first, and needed it (the `[ ]` mark is in the text, so a bullet would read as a bullet followed by
+a checkbox).
+
+Fixed per Prime Directive #1 — probed, not reasoned about. `scripts/verify-pptx-bullet-none.ts` builds four
+variants against real pptxgenjs 4.0.1 and reads the OOXML:
+
+| variant | paragraphs (want 3) | buChar | buNone |
+|---|---|---|---|
+| A: `bullet:true` (control) | 3 ✅ | 3 | 0 |
+| B: `bullet:false` | 3 ✅ | 0 | **3** |
+| C: `bullet` omitted | 3 ✅ | 0 | 3 |
+| D: omitted, **no `breakLine`** | **1 ❌ COLLAPSED** | 0 | 3 |
+
+→ `bullet: false` is the correct emission: pptxgenjs writes an explicit `<a:buNone/>`, which is OOXML's way
+to say "no marker", and it keeps one paragraph per item. `BulletOptions.type` now carries `"none"` as a real
+value rather than expressing it by omission, so the two renderers cannot silently disagree again.
+
+**Variant D also caught a second-order defect the fix would otherwise have created.** The exporter's C5
+backstop filtered runs with `run.options?.bullet !== false`, which was harmless only while nothing produced
+`false` — once `"none"` emitted it, the backstop would have silently exempted every markerless list from the
+paragraph-collapse check. D proves the collapse does **not** depend on bullets (three markerless runs
+without `breakLine` serialize as ONE paragraph — C5 is a property of shape-level `align`, not of markers),
+so the filter is now `bullet !== undefined`. Two regression tests in `tests/pptx-text.test.ts` lock both
+halves down.
+
+### Two design decisions inside the layout that §1.1 forced
+
+- **The checkbox is ASCII `[ ] `, not U+2610 `☐`.** C4 established that pptxgenjs cannot embed fonts and
+  writes `fontFace` verbatim, so **a substituted font is undetectable at export time** — and desktop-Office
+  font substitution is the one open ⚠️ VERIFY item on this project. A missing `☐` renders as tofu in the
+  artifact the audience sees and nothing in our pipeline could tell. `[ ]` is three characters every
+  ratified face has.
+- **Not `addShape("rect")` squares.** One square per item means computing per-item row offsets, i.e.
+  subdividing the `items` zone. `stats` does that, and it is why `tests/pptx-exporter.test.ts` carries a
+  `stats` special case in its §8 zone-fidelity loop — a second subdividing layout would have needed a second
+  one, putting a test file in the diff and **failing the proof**. Text-only items sit at exactly their
+  declared zone, which is what makes the layout free of downstream edits.
+
+Marks are applied by a `markItems` helper that **both** renderers call, for the same reason both consume
+`resolveZones`. It tolerates `[]`/`[ ]`/`[x]` from a model rather than only our own form, so a model that
+volunteers a prefix does not produce `[ ] [ ] item`.
+
+### The budget hygiene rule caught a real error in the new file
+
+`tests/layout-budgets.test.ts` failed with *`checklist: "title" (title, 84% wide) budgets more characters
+than "items" (body, 84% wide) despite rendering at a larger point size: expected 55 to be less than or equal
+to 48`*. `maxChars: 55` had been copied from `bullets`, but at 32pt in an 84%-wide box a title holds fewer
+characters than 18pt body text in the same width, and the rule has no width exemption when widths are equal.
+Corrected to 48. Recorded because it is the invariant working exactly as designed on its first new consumer.
+
+### §10's second clause — the model registry one-entry check: **PASSED, with a zero-line outside diff**
+
+A probe entry (`us.anthropic.probe-model-v1:0`) was added to `LLM_MODELS`, verified via
+`out/proof-model-reach.mjs`, and **reverted** — shipping a model id nobody invoked would violate Prime
+Directive #1, and `verified: false` is a claim about a round-trip, not a placeholder.
+
+All 10 checks passed: `findModel`/`allModels`/`requireModel` resolve it; `/api/registry/models` exposes it
+with `verified: false` surfaced (so an un-invoked model is *labelled*, not hidden); `familyFor` resolves its
+family with no model-id branching; `clampTemperature` reads the descriptor; and `DEFAULT_MODEL_ID` is
+unchanged, so an addition cannot re-route existing generation. **The full suite stayed green — 35 files /
+1150 tests — with the registry as the only changed file**, so the model registry is stricter than the layout
+registry was: no test freezes its inventory at all.
+
+### Suite state
+
+`npm run verify` green: **35 files / 1150 tests**. `npm run verify:pptx:fixture:render` renders 9 pages per
+deck in both modes.
+
+### Still open (unchanged by this section)
+
+- **Screens**: `@dnd-kit` slide reorder, `next-themes` provider.
+- Deferred/flagged: desktop PowerPoint open-test (⚠️ VERIFY #5 — deferred, not waived; note that the
+  `marker:"none"` fix above is confirmed by LibreOffice and by OOXML inspection, not by desktop Office),
   `AVG_ADVANCE_EM` per-face metrics (⚠️ VERIFY #6), Docker smoke (skipped by user decision).

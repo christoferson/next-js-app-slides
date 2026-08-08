@@ -435,7 +435,7 @@ function LayoutPicker(
             value={slide.layoutOverride ?? ""}
             onChange={(event) => onLayout(event.target.value === "" ? null : event.target.value)}
             disabled={busy || disabled}
-            className="w-full rounded-md border border-line bg-white px-2.5 py-1.5 text-sm disabled:opacity-50"
+            className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm disabled:opacity-50"
           >
             <option value="">Automatic — {row.layoutDisplayName}</option>
             {row.options.map((option) => (

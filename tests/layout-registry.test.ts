@@ -14,6 +14,9 @@ import {
 import type { SlideLayout, SlotSpec } from "@/lib/layouts/types";
 import type { SlotZone } from "@/lib/brand/types";
 
+/**
+ * SPEC §6's seed set, in deck order. Deliberately NOT the whole registry — see the assertion below.
+ */
 const SEED_IDS = [
   "title", "agenda", "section_divider", "bullets", "two_column", "quote", "stats", "closing",
 ];
@@ -56,8 +59,34 @@ describe("the real registry", () => {
     expect(() => assertRegistryInvariants()).not.toThrow();
   });
 
-  it("contains exactly the SPEC §6 seed set, in deck order", () => {
-    expect(LAYOUTS.map((l) => l.id)).toEqual(SEED_IDS);
+  it("opens with the SPEC §6 seed set, in deck order", () => {
+    /*
+     * A PREFIX assertion, not an equality one, and the change is CLAUDE.md §10's doing.
+     *
+     * This read `toEqual(SEED_IDS)` until the `checklist` layout was added as §10's one-file proof, and
+     * it was the single test in the suite that failed — which is the useful result rather than an
+     * obstacle: it proved no *behaviour* anywhere depends on the registry's inventory (every other
+     * count derives from `LAYOUTS.length`), and it located the one place that had frozen it.
+     *
+     * The two things this test actually protects are kept:
+     *   - the seed layouts all still exist, and
+     *   - they remain in their original ORDER, which is load-bearing rather than cosmetic:
+     *     `intentMatchRule` takes the first layout claiming a hint, so reordering this array silently
+     *     re-routes existing decks. A new layout must therefore be APPENDED, and that is exactly what
+     *     `slice(0, SEED_IDS.length)` enforces while leaving the registry extensible.
+     *
+     * Freezing the full inventory instead would mean every future layout — the thing §4 promises is one
+     * file plus one line — also required editing this file. That is the parallel table §4 forbids,
+     * wearing a test's clothes.
+     */
+    expect(LAYOUTS.map((l) => l.id).slice(0, SEED_IDS.length)).toEqual(SEED_IDS);
+  });
+
+  it("contains no duplicate ids once extended past the seed set", () => {
+    // The property `toEqual(SEED_IDS)` used to give for free. `registryProblems` also checks it; stated
+    // here so the relaxation above cannot hide a second layout shadowing a seed one by id.
+    const ids = LAYOUTS.map((l) => l.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 
   it("covers every VisualHint, so mapping can never fall through for a valid outline", () => {

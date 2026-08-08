@@ -20,7 +20,7 @@ export default function Home() {
       <div className="grid gap-4 sm:grid-cols-2">
         <Link
           href="/brands"
-          className="group rounded-lg border border-line bg-white p-4 transition-colors hover:border-ink-soft"
+          className="group rounded-lg border border-line bg-surface p-4 transition-colors hover:border-ink-soft"
         >
           <Palette aria-hidden className="size-5 text-ink-soft" />
           <h2 className="mt-2 font-medium group-hover:underline">Brands</h2>
@@ -31,7 +31,7 @@ export default function Home() {
 
         <Link
           href="/decks"
-          className="group rounded-lg border border-line bg-white p-4 transition-colors hover:border-ink-soft"
+          className="group rounded-lg border border-line bg-surface p-4 transition-colors hover:border-ink-soft"
         >
           <Presentation aria-hidden className="size-5 text-ink-soft" />
           <h2 className="mt-2 font-medium group-hover:underline">Decks</h2>

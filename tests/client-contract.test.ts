@@ -30,6 +30,15 @@ import { readFile } from "node:fs/promises";
 import { glob } from "node:fs/promises";
 import path from "node:path";
 import { api } from "@/lib/client/api";
+// The real handlers, for the response-shape checks at the bottom of this file. Imported here rather than
+// re-implemented, so the assertion is about what a browser actually receives.
+import { GET as getLayouts } from "@/app/api/registry/layouts/route";
+import { GET as getFonts } from "@/app/api/registry/fonts/route";
+import { GET as getTones } from "@/app/api/registry/tones/route";
+import { GET as getModels } from "@/app/api/registry/models/route";
+import { GET as listBrandsRoute, POST as createBrandRoute } from "@/app/api/brands/route";
+import { GET as listDecksRoute } from "@/app/api/decks/route";
+import { req, routeHarness } from "@/tests/route-harness";
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -120,6 +129,7 @@ const INVOCATIONS: Record<string, () => Promise<unknown>> = {
   "brands.update": () => api.brands.update("b1", {}),
   "brands.remove": () => api.brands.remove("b1"),
   "brands.import": () => api.brands.import({}),
+  "brands.importInto": () => api.brands.importInto("b1", {}),
   "brands.upload": () => api.brands.upload("b1", new File(["x"], "x.png"), { kind: "logo" }),
   "brands.removeAsset": () => api.brands.removeAsset("b1", "a1"),
 
@@ -244,5 +254,122 @@ describe("API client ↔ route contract", () => {
     expect(await headersFor(
       () => api.brands.upload("b1", new File(["x"], "x.png"), { kind: "logo" }),
     )).not.toHaveProperty("content-type");
+  });
+});
+
+/* ─────────────────────────── response SHAPE, not just path and verb ─────────────────────────── */
+
+/**
+ * The third fact a client method encodes, and the one this suite originally missed: the RESPONSE SHAPE.
+ *
+ * `request<T>` casts an `unknown` body to whatever the caller names, so `api.brands.list<BrandSummary[]>()`
+ * type-checks perfectly while the route answers `{brands: [...]}`. Both screens that did this crashed at
+ * runtime with `data.brands.map is not a function` — found by opening the page, not by any test. Path and
+ * verb were both correct, which is exactly why the checks above could not see it.
+ *
+ * So: call the REAL handlers and assert that every collection route answers with a named envelope, and
+ * that the key is the one the screens unwrap. Nothing here is hand-copied from the route sources — the
+ * assertion is on live response bodies, so a route that changed its envelope fails here rather than in a
+ * browser.
+ *
+ * Scoped to the list/registry GETs deliberately. The single-resource GETs are already pinned by the route
+ * suites (`routes-decks.test.ts` asserts each envelope it returns), and re-asserting them here would be
+ * the duplication `route-harness.ts` warns against.
+ */
+describe("API client ↔ route response shape", () => {
+  /**
+   * Registry routes need no container: they serve static data (§1.3 — the app must boot and serve
+   * `/api/registry/*` with no AWS credentials). `/api/brands` and `/api/decks` DO need one, so they get
+   * the memory-backed harness via `routeHarness`, the same wiring the route suites use.
+   */
+  const COLLECTIONS: ReadonlyArray<{ name: string; key: string; get: () => Promise<Response> }> = [
+    { name: "registry.layouts", key: "layouts", get: getLayouts },
+    { name: "registry.fonts", key: "fonts", get: getFonts },
+    { name: "registry.tones", key: "tones", get: getTones },
+    { name: "registry.models", key: "models", get: getModels },
+    { name: "brands.list", key: "brands", get: () => listBrandsRoute(req("GET")) },
+    { name: "decks.list", key: "decks", get: () => listDecksRoute(req("GET")) },
+  ];
+
+  it.each(COLLECTIONS)(
+    "$name answers with a named `$key` envelope containing an array",
+    async ({ key, get }) => {
+      routeHarness();
+      const body = (await (await get()).json()) as Record<string, unknown>;
+
+      // An envelope, not a bare array: a top-level array cannot gain a sibling field later without
+      // breaking every client, which is why every collection route here is wrapped.
+      expect(Array.isArray(body)).toBe(false);
+      expect(body, `expected a \`${key}\` key, got: ${Object.keys(body).join(", ")}`)
+        .toHaveProperty(key);
+      expect(Array.isArray(body[key])).toBe(true);
+    },
+  );
+
+  /**
+   * A CREATE response is not a list item, and the gallery screens must not treat it as one.
+   *
+   * `POST /api/brands` answers `BrandDefinition`; `GET /api/brands` answers `BrandSummary`, which carries
+   * the DERIVED `templatedLayoutIds` (`Object.keys(brand.templates)`, computed in the repository). Same for
+   * decks: a summary has `slideCount`, a `DeckMeta` does not. Both screens prepended the create response
+   * straight into the list, so the new row rendered `undefined.length` and threw.
+   *
+   * Asserted on the LIVE responses, by diffing their key sets — a hand-written list of which fields are
+   * derived would be the §4 parallel table this suite already refuses to keep.
+   */
+  it.each([
+    { name: "brands", create: () => createBrandRoute(req("POST", { name: "T" })), list: () => listBrandsRoute(req("GET")), key: "brands" },
+  ])("$name: the create response lacks derived summary fields, so a screen must not prepend it", async ({ create, list, key }) => {
+    routeHarness();
+    await (await create()).json();
+    const listed = (await (await list()).json()) as Record<string, Record<string, unknown>[]>;
+    const summary = listed[key]?.[0];
+    expect(summary, "the created entity should appear in the list").toBeDefined();
+
+    const created = (await (await create()).json()) as Record<string, unknown>;
+    const derived = Object.keys(summary as Record<string, unknown>)
+      .filter((k) => !Object.hasOwn(created, k));
+
+    // If this ever becomes empty the two shapes have converged and the `reload` below could be relaxed —
+    // but while it is non-empty, prepending is a crash.
+    expect(derived.length, "expected at least one derived summary field").toBeGreaterThan(0);
+  });
+
+  /** So both galleries must re-read the list after creating, not splice the response in. */
+  it.each([
+    { rel: "app/brands/page.tsx", method: "api.brands.create" },
+    { rel: "app/decks/page.tsx", method: "api.decks.create" },
+  ])("$rel reloads after $method rather than prepending its response", async ({ rel, method }) => {
+    const source = await readFile(path.join(ROOT, rel), "utf8");
+    const call = source.slice(source.indexOf(method));
+    const body = call.slice(0, call.indexOf("} catch"));
+    expect(body, `${rel} should reload() after ${method}`).toMatch(/reload\(\)/);
+    // The specific mistake: feeding the create response into the list state.
+    expect(body, `${rel} should not splice the create response into the list`)
+      .not.toMatch(/set\(\s*[[{][^)]*\.\.\./);
+  });
+
+  /**
+   * The screens' side of the envelope contract.
+   *
+   * A route could answer `{brands}` while a screen still unwraps `.items` — the envelope check above would
+   * pass and the page would render nothing. This reads the two list screens and asserts they name the key
+   * the route actually sends, which is the pair that broke.
+   */
+  it("has the list screens unwrap the key their route sends", async () => {
+    const cases = [
+      { rel: "app/brands/page.tsx", key: "brands" },
+      { rel: "app/decks/page.tsx", key: "decks" },
+      { rel: "app/decks/page.tsx", key: "brands" },
+    ];
+    for (const { rel, key } of cases) {
+      const source = await readFile(path.join(ROOT, rel), "utf8");
+      // The generic names the envelope AND the value is read off it — an assertion of the bare array type
+      // is what shipped, so both halves are checked.
+      expect(source, `${rel} should assert a { ${key}: … } envelope`)
+        .toMatch(new RegExp(`<\\{\\s*${key}:`));
+      expect(source, `${rel} should read \`.${key}\` off the response`)
+        .toMatch(new RegExp(`\\.${key}\\b`));
+    }
   });
 });

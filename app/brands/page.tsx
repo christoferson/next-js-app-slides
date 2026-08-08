@@ -14,8 +14,21 @@ import { useResource } from "@/components/use-resource";
 import { Button, Card, Empty, ErrorNote } from "@/components/ui/primitives";
 
 export default function BrandsPage() {
+  /**
+   * `{ brands }`, not a bare array.
+   *
+   * Every list route in this app answers with a NAMED envelope (`{brands}`, `{decks}`, `{layouts}`) so a
+   * field can be added later without breaking clients. This screen asserted `BrandSummary[]` instead and
+   * crashed at `brands.map` — a lie the compiler could not catch, because `request<T>` casts an
+   * `unknown` body to whatever the caller names. Unwrapped here in the fetcher rather than at each use
+   * site, so `brands` is the array its name promises. `tests/client-contract.test.ts` now checks the
+   * envelope for every list method, so the next one fails a test instead of a screen.
+   */
   const { data: brands, error: loadError, reload, set } = useResource(
-    useCallback(() => api.brands.list<BrandSummary[]>(), []),
+    useCallback(
+      async () => (await api.brands.list<{ brands: BrandSummary[] }>()).brands,
+      [],
+    ),
   );
   const [actionError, setActionError] = useState<ApiError | undefined>();
   const [busy, setBusy] = useState(false);
@@ -24,13 +37,26 @@ export default function BrandsPage() {
    * Create with a name only: `brandInputSchema` supplies every other default, so a new brand is a complete,
    * valid, on-brand default rather than a half-filled record — the reason `BrandService.create` documents
    * for keeping defaults in the schema.
+   *
+   * ## Why this reloads instead of prepending the response
+   *
+   * `POST /api/brands` answers with a `BrandDefinition`; this list holds `BrandSummary`. They are NOT the
+   * same shape — a summary carries `templatedLayoutIds`, which the repository DERIVES from
+   * `Object.keys(brand.templates)` and which therefore does not exist on the definition. Prepending the
+   * response satisfied the compiler (the generic was simply asserted as `BrandSummary`) and then threw
+   * `Cannot read properties of undefined (reading 'length')` on the new row's template count.
+   *
+   * Converting client-side would mean a second copy of that derivation, which is what §4 forbids — so the
+   * server stays the only place that knows how a summary is built, and `reload` re-reads it. That is also
+   * exactly what `useResource` documents `set` is NOT for: "a mutation that could change anything derived
+   * should `reload` instead". One extra request per brand creation, in exchange for one shape.
    */
   const create = async () => {
     setBusy(true);
     setActionError(undefined);
     try {
-      const brand = await api.brands.create<BrandSummary>({ name: "New brand" });
-      set([brand, ...(brands ?? [])]);
+      await api.brands.create({ name: "New brand" });
+      reload();
     } catch (cause) {
       if (cause instanceof ApiError) setActionError(cause);
       else throw cause;

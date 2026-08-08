@@ -22,11 +22,14 @@ export default function DecksPage() {
   // and one combined fetcher keeps them in a single loading/error state instead of two interleaving ones.
   const { data, error: loadError, reload, set } = useResource(
     useCallback(async () => {
+      // Both routes answer with a NAMED envelope (`{decks}` / `{brands}`), which is unwrapped here so the
+      // rest of the screen reads plain arrays. Asserting the array type directly compiled fine and threw
+      // `data.brands.map is not a function` at runtime — see the note in `app/brands/page.tsx`.
       const [decks, brands] = await Promise.all([
-        api.decks.list<DeckSummary[]>(),
-        api.brands.list<BrandSummary[]>(),
+        api.decks.list<{ decks: DeckSummary[] }>(),
+        api.brands.list<{ brands: BrandSummary[] }>(),
       ]);
-      return { decks, brands };
+      return { decks: decks.decks, brands: brands.brands };
     }, []),
   );
 
@@ -39,16 +42,23 @@ export default function DecksPage() {
   // during render avoids a second source of truth that could disagree with the fetched list.
   const effectiveBrandId = brandId !== "" ? brandId : (data?.brands[0]?.id ?? "");
 
+  /**
+   * Reloads rather than prepending the response, for the same reason `app/brands/page.tsx` does:
+   * `POST /api/decks` answers with a `DeckMeta`, and this list holds `DeckSummary`, which additionally
+   * carries the DERIVED `slideCount`. Prepending gave the new row `undefined slides` — the generic said
+   * `DeckSummary` and nothing checked it. Deriving the count client-side would be a second copy of a
+   * server-side rule (§4), so the server stays its only owner.
+   */
   const create = async () => {
     if (data === undefined) return;
     setBusy(true);
     setActionError(undefined);
     try {
-      const deck = await api.decks.create<DeckSummary>({
+      await api.decks.create({
         title: title.trim() === "" ? "Untitled deck" : title.trim(),
         brandId: effectiveBrandId,
       });
-      set({ ...data, decks: [deck, ...data.decks] });
+      reload();
       setTitle("");
     } catch (cause) {
       if (cause instanceof ApiError) setActionError(cause);
@@ -112,7 +122,7 @@ export default function DecksPage() {
                   <select
                     value={effectiveBrandId}
                     onChange={(event) => setBrandId(event.target.value)}
-                    className="w-full rounded-md border border-line bg-white px-2.5 py-1.5 text-sm"
+                    className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm"
                   >
                     {data.brands.map((brand) => (
                       <option key={brand.id} value={brand.id}>{brand.name}</option>
@@ -133,7 +143,7 @@ export default function DecksPage() {
       {data?.decks.length === 0 && <Empty>No decks yet.</Empty>}
 
       {data !== undefined && data.decks.length > 0 && (
-        <ul className="divide-y divide-line overflow-hidden rounded-lg border border-line bg-white">
+        <ul className="divide-y divide-line overflow-hidden rounded-lg border border-line bg-surface">
           {data.decks.map((deck) => (
             <li key={deck.id} className="flex items-center gap-4 px-4 py-3">
               <div className="min-w-0 flex-1">

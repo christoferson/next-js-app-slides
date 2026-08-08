@@ -7,27 +7,93 @@
  * appear ONLY inside a slide preview, driven by `DesignTokens` from `compileTheme`. Mixing the two would
  * make "is this the brand's blue or the app's blue?" unanswerable at a glance, which is the one question a
  * brand editor must never leave ambiguous.
+ *
+ * That rule is what makes dark mode cheap here, and it is also its one real hazard — see below.
  */
+
+/**
+ * `dark:` must be CLASS-based, not `prefers-color-scheme`.
+ *
+ * VERIFIED, not assumed (`out/probe-dark-variant/`, compiled through Tailwind 4.3.3's own compiler):
+ * without this line `dark:bg-black` emits `@media (prefers-color-scheme: dark)` and NO `.dark` selector.
+ * `next-themes` works by toggling a class on <html>, so the provider would have been completely inert —
+ * a toggle that visibly does nothing. This declaration is what connects the two.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --color-ink: #14141b;
   --color-ink-soft: #3f3f4b;
   --color-line: #e3e3e8;
   --color-canvas: #f7f7f9;
 
+  /*
+   * The raised surface — cards, inputs, popovers. Introduced with dark mode to replace 22 literal
+   * `bg-white` utilities across `app/**` and `components/**`.
+   *
+   * `bg-white` is not a token: it is white in both themes, so each occurrence would have needed its own
+   * `dark:` variant, and the next screen would need them too. One named token means the theme flip happens
+   * in ONE place (the `.dark` block below) rather than at every call site — the same reason the layout
+   * registry exists instead of a table per consumer.
+   */
+  --color-surface: #ffffff;
+
   /* Quality-badge amber (§12). One colour, so a badge is recognizable wherever it appears. */
   --color-flag: #b45309;
   --color-flag-bg: #fef3c7;
+
+  /* Destructive/error surfaces. Tokenized for the same reason as `surface`: `bg-red-50` and friends are
+   * fixed light-mode values, and `ErrorNote` is the one error surface in the app (§12). */
+  --color-danger: #b91c1c;
+  --color-danger-bg: #fef2f2;
+  --color-danger-line: #fecaca;
+}
+
+/**
+ * The dark palette.
+ *
+ * A plain `.dark` block overriding the SAME `--color-*` names works because Tailwind v4 compiles
+ * `bg-ink` to `background-color: var(--color-ink)` — verified in `out/probe-dark-variant/probe3.mjs`,
+ * after a first probe misread a preflight line and wrongly concluded it compiled to a literal. So no
+ * `@theme inline` indirection is needed.
+ *
+ * Every text pair here is checked against the project's OWN `contrastRatio` at AA — the app enforces that
+ * bar on every brand it compiles, and studio chrome that failed it would be the tool not eating its own
+ * cooking. `tests/dark-theme.test.ts` is that check; `out/probe-dark-palette.ts` is where it was derived.
+ * The §12 amber badge matters most: it may never be suppressed, and an illegible badge is suppression by
+ * another name (light 4.51:1 → dark 7.88:1).
+ */
+.dark {
+  --color-ink: #ececf1;
+  --color-ink-soft: #a3a3b2;
+  --color-line: #2c2c38;
+  --color-canvas: #111117;
+  /* Lifted off the page, not inverted to black: a card has to read as raised in both themes. */
+  --color-surface: #1a1a22;
+
+  --color-flag: #fbbf24;
+  --color-flag-bg: #3b2f0b;
+
+  --color-danger: #fca5a5;
+  --color-danger-bg: #2a1416;
+  --color-danger-line: #58272b;
 }
 
 @layer base {
-  :root {
+  html {
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    /*
+     * Native widget theming (scrollbars, date pickers, the file input the brand editor uses) follows
+     * `color-scheme`, not our variables. `next-themes` is mounted with `enableColorScheme` so it maintains
+     * this on <html> itself; the declarations here are the no-JS fallback, and they must agree with the
+     * class or a themed page would keep light scrollbars.
+     */
     color-scheme: light;
   }
 
-  html {
-    /* `next-themes` toggles `.dark` on <html>; dark mode is a later pass, not faked here. */
-    background: var(--color-canvas);
-    color: var(--color-ink);
+  html.dark {
+    color-scheme: dark;
   }
 
   body {
@@ -43,3 +109,17 @@
     outline-offset: 2px;
   }
 }
+
+/**
+ * ⚠️ THE §8 HAZARD, and the one rule this file exists to state.
+ *
+ * A slide preview is a scale model of the EXPORT. Its colours come from `DesignTokens` (`compileTheme`),
+ * never from the studio's palette, so it must look identical in both themes — a preview that dimmed itself
+ * in dark mode would be showing the user something the .pptx will not contain, which is precisely the
+ * preview/export divergence §8 exists to prevent.
+ *
+ * That holds structurally today: `lib/layouts/preview.tsx` and every layout's `FallbackRenderer` style
+ * exclusively with inline `style` from tokens, and use no Tailwind colour utility at all. It is asserted
+ * in `tests/dark-theme.test.ts` rather than left as a convention, because the failure mode is a single
+ * well-meaning `dark:` variant added to a preview component months from now.
+ */

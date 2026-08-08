@@ -40,6 +40,11 @@ import type { AssetKind } from "@/lib/domain/asset";
 import type { BrandDefinition, BrandSummary, DesignTokens } from "@/lib/brand/types";
 import type { Briefing, DeckMeta, DeckSummary, Outline, Slide } from "@/lib/domain/deck";
 import { Unauthorized } from "@/lib/errors/errors";
+// The one non-type import outside `lib/services`/`lib/errors`, and deliberately the shared rule rather
+// than a local `Object.entries(...).filter(...)`: which layouts count as templated is `render-mode`'s
+// decision (§6's "never branched at call sites"), and a second copy here could disagree with the
+// resolver about the very brand it is resolving.
+import { templatedLayoutIds } from "@/lib/layouts/render-mode";
 import type { BrandService, ResolvedTemplate } from "@/lib/services/brand-service";
 import type { DeckService, SlidePatch } from "@/lib/services/deck-service";
 import type { ExportService } from "@/lib/services/export-service";
@@ -82,6 +87,14 @@ export interface AssetUpload {
   layoutId?: string;
   width?: number;
   height?: number;
+}
+
+/** What the brand editor loads in one request — see `getBrandTheme` for why the three travel together. */
+export interface BrandThemeView {
+  brand: BrandDefinition;
+  tokens: DesignTokens;
+  /** One per TEMPLATED layout, carrying the luminance/size facts only the server can produce (§12). */
+  templates: ResolvedTemplate[];
 }
 
 /** What the workspace screen loads in one request (SPEC §9). */
@@ -130,16 +143,28 @@ export class StudioFacade {
   }
 
   /**
-   * Brand + compiled tokens — what the brand editor's live preview needs.
+   * Brand + compiled tokens + resolved templates — everything the brand editor's live preview needs.
    *
-   * One call rather than two because the tokens must describe the brand that was read: `compileTheme`
-   * runs contrast repair, and a preview showing repaired colours for a *different* revision of the brand
-   * is exactly the kind of drift §8 is written to prevent.
+   * One call rather than three, for the reason `WorkspaceView` is one call: the tokens must describe the
+   * brand that was read (`compileTheme` runs contrast repair, so separately-fetched tokens can describe a
+   * different revision — the drift §8 exists to prevent), and the same argument extends to the templates.
+   * `ResolvedTemplate` carries the two facts only the server has — `backgroundLuminance` and
+   * `backgroundSize` — and both feed §12 badges on that screen: a preview whose letterbox warning came
+   * from one revision of the brand while its zones came from another would be worse than no warning.
+   *
+   * Resolved only for layouts the brand has actually TEMPLATED (`templatedLayoutIds` — the same
+   * background-present rule the resolver itself uses). An untemplated layout has no background, so there
+   * is nothing here the client does not already know from `brand.templates`, and resolving all of them
+   * would make this read scale with the registry instead of with the brand.
    */
-  async getBrandTheme(
-    headers: Headers, brandId: string,
-  ): Promise<{ brand: BrandDefinition; tokens: DesignTokens }> {
-    return this.deps.brands.themeFor(await this.userId(headers), brandId);
+  async getBrandTheme(headers: Headers, brandId: string): Promise<BrandThemeView> {
+    const userId = await this.userId(headers);
+    const { brand, tokens } = await this.deps.brands.themeFor(userId, brandId);
+    const templates = await Promise.all(
+      templatedLayoutIds(brand).map((layoutId) =>
+        this.deps.brands.resolveTemplate(userId, brandId, layoutId)),
+    );
+    return { brand, tokens, templates };
   }
 
   /** Zones + background for one layout, through the §8 shared resolver. */
