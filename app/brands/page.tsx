@@ -8,9 +8,10 @@
 import { useCallback, useState } from "react";
 import Link from "next/link";
 import { Plus, Trash2 } from "lucide-react";
-import type { BrandSummary } from "@/lib/brand/types";
+import type { BrandDefinition, BrandSummary } from "@/lib/brand/types";
 import { ApiError, api } from "@/lib/client/api";
 import { useResource } from "@/components/use-resource";
+import { JsonImportField } from "@/components/brand/json-import";
 import { Button, Card, Empty, ErrorNote } from "@/components/ui/primitives";
 
 export default function BrandsPage() {
@@ -65,6 +66,41 @@ export default function BrandsPage() {
     }
   };
 
+  /**
+   * Import a shared config as a NEW brand (SPEC §5; the create half of §11 step 3).
+   *
+   * This is the last client method that no screen reached. The editor's import REPLACES the brand being
+   * edited, which is useless for the flow that actually happens: someone sends you a config and you have no
+   * brand to overwrite. Doing it there would mean creating a throwaway brand first and then destroying its
+   * contents — so the create path belongs on the gallery, next to "New brand".
+   *
+   * `POST /api/brands/import` takes a whole exported definition (ids and timestamps included) rather than
+   * `brandInputSchema`'s editable surface, which is why it is a separate endpoint: an export sent to
+   * `POST /api/brands` fails on four unrecognized keys. The payload's `id`/`userId` are discarded
+   * server-side, so a crafted config cannot write into another user's partition or overwrite an existing
+   * brand — it always creates.
+   *
+   * Reloads rather than prepending the 201, for the reason `create` documents at length: the response is a
+   * `BrandDefinition` and this list holds `BrandSummary`, and `templatedLayoutIds` is derived server-side.
+   * An imported brand is the most likely of all to carry templates, so this is precisely the case where
+   * prepending would show `undefined.length`.
+   */
+  const importBrand = async (parsed: unknown) => {
+    setBusy(true);
+    setActionError(undefined);
+    try {
+      await api.brands.import<BrandDefinition>(parsed);
+      reload();
+    } catch (cause) {
+      // The expected failure is `InvalidBrandConfig` (400) carrying field-level zod issues, which
+      // `ErrorNote` renders one per line — §12's "field-level readable zod errors".
+      if (cause instanceof ApiError) setActionError(cause);
+      else throw cause;
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const remove = async (brandId: string) => {
     setActionError(undefined);
     try {
@@ -102,6 +138,29 @@ export default function BrandsPage() {
           {...(loadError !== undefined ? { onRetry: reload } : {})}
         />
       )}
+
+      {/* Collapsed: importing is the rarer path, and an always-open textarea would compete with "New brand"
+          for the primary action on a screen whose job is to list brands. */}
+      <Card className="p-4">
+        <details>
+          <summary className="cursor-pointer text-sm font-medium">
+            Import a brand from JSON
+            <span className="ml-2 font-normal text-ink-soft">
+              — paste a config someone shared, or a file you exported
+            </span>
+          </summary>
+          <div className="mt-3">
+            <JsonImportField
+              label="Config JSON"
+              hint="Creates a new brand. Your existing brands are untouched, and nothing is applied if it is invalid."
+              submitLabel="Create brand from JSON"
+              pendingLabel="Importing…"
+              busy={busy}
+              onSubmit={(parsed) => void importBrand(parsed)}
+            />
+          </div>
+        </details>
+      </Card>
 
       {brands === undefined && loadError === undefined && <Empty>Loading…</Empty>}
 

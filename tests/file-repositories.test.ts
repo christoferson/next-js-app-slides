@@ -7,7 +7,7 @@
  */
 
 import { afterAll, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { assetStoreContract, brandRepositoryContract, deckRepositoryContract } from "@/tests/repository-contract";
@@ -85,6 +85,45 @@ describe("file backend specifics", () => {
     await write;
     for (const content of reads) expect(() => JSON.parse(content)).not.toThrow();
     expect(JSON.parse(await readFile(target, "utf8")).pad).toHaveLength(2_000_000);
+  });
+
+  it("completes the swap even while a reader holds the destination open (Windows EPERM)", async () => {
+    // The timing-dependent sibling above passed three isolated runs and failed once under the full
+    // suite. This is the same defect made deterministic: on Windows a rename over a file any process
+    // holds open fails EPERM, and readers here are deliberately unlocked, so the window is real in
+    // production — every GET reads a file some PATCH may be replacing.
+    //
+    // The handle is open when the write starts and closes shortly after — which is what a real reader
+    // is: `readFile` opens and closes in one go. A handle held open FOREVER is deliberately not the
+    // case under test: no retry budget can beat a reader that never lets go, and asserting otherwise
+    // would claim more than the fix delivers (the first draft of this test did exactly that, and
+    // failed).
+    //
+    // The ordering matters and is why the timer is armed AFTER the write is kicked off rather than
+    // before: the first rename attempt must happen while the handle is still open, or the bare
+    // `rename` would succeed and this test would prove nothing. The second draft armed it first and
+    // was non-discriminating for exactly that reason. The 40ms hold sits between the first attempt
+    // (immediate — the payload is tiny) and the exhausted retry budget (90ms).
+    //
+    // Against a bare `rename` this fails on Windows; on POSIX the rename simply succeeds and the
+    // assertions still hold — the right outcome on both platforms rather than a skipped test.
+    const root = await freshDir();
+    const target = path.join(root, "held.json");
+    await writeFile(target, JSON.stringify({ pad: "old" }));
+
+    const handle = await open(target, "r");
+    const write = writeFileAtomic(target, JSON.stringify({ pad: "new" }));
+    const released = new Promise<void>((resolve) => {
+      setTimeout(() => void handle.close().then(resolve), 40);
+    });
+
+    await write;
+    await released;
+
+    expect(JSON.parse(await readFile(target, "utf8")).pad).toBe("new");
+    // And no debris: a retried rename must not leave the temp file behind.
+    const { readdir } = await import("node:fs/promises");
+    expect((await readdir(root)).filter((n) => n.startsWith(".tmp-"))).toEqual([]);
   });
 
   it("leaves no temp files behind", async () => {

@@ -265,6 +265,50 @@ describe("BrandService — delete guard (§11 step 11)", () => {
     const h = harness();
     await rejectsWith("BrandNotFound", () => h.services.brands.delete(h.userId, "nope"));
   });
+
+  /**
+   * Pins the CURRENT behaviour of a known limitation, found live rather than by reasoning: deleting a
+   * brand leaves its assets in the store, and because `knownAssetIds` enumerates *references* rather than
+   * stored assets, those surviving bytes stop validating. A config exported before the delete then fails
+   * to import with "refers to an image that no longer exists" — while `GET /api/assets/:id` still serves
+   * the image.
+   *
+   * Asserting it (rather than only writing it in a comment) means whichever fix lands — cascade the
+   * deletion, or add `list` to the asset port — breaks this test and has to update it deliberately. A
+   * limitation nothing asserts is one the next person rediscovers from a user report.
+   */
+  it("leaves assets behind, so a config exported beforehand no longer imports (known limitation)", async () => {
+    const h = harness();
+    const brand = await h.services.brands.create(h.userId, brandInput());
+    const { assetId } = await h.services.brands.addAsset(h.userId, brand.id, bytes(), upload());
+
+    // What the editor's "Export JSON" produces, captured while the brand still exists.
+    const exported = await h.services.brands.get(h.userId, brand.id);
+    expect(exported.templates.title?.backgroundAssetId).toBe(assetId);
+
+    await h.services.brands.delete(h.userId, brand.id);
+
+    // The bytes survive: this is a leak, not a cascade.
+    await expect(h.container.assets.getMeta(h.userId, assetId)).resolves.not.toBeNull();
+
+    // But nothing references them any more, so the validator cannot see them and the round trip that
+    // §11 step 3 promises is broken for this config.
+    const err = await rejectsWith(
+      "InvalidBrandConfig",
+      () => h.services.brands.importConfig(h.userId, exported),
+    );
+    // `issues` is on `detail`, not on the AppError itself — the HTTP body's `issues` key is produced by
+    // the route's serializer (errors.ts:305), so a test at the service layer has to read the source.
+    const issues = (err.detail as { issues: string[] }).issues;
+    expect(issues.join(" ")).toMatch(/no longer exists/i);
+
+    // The same config imports fine while ANY brand still references the asset — proof the failure is the
+    // reference bookkeeping and not the asset itself.
+    const holder = await h.services.brands.create(h.userId, brandInput());
+    await h.services.brands.addAsset(h.userId, holder.id, bytes(), upload());
+    const held = await h.services.brands.get(h.userId, holder.id);
+    await expect(h.services.brands.importConfig(h.userId, held)).resolves.toBeTruthy();
+  });
 });
 
 describe("BrandService — assets", () => {

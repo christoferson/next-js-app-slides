@@ -2571,7 +2571,9 @@ one direction that matters.
 
 Then re-verified live (`out/probe-screens.mjs`): all 7 screens 200, create→list→delete round-trips clean
 for both resources, the new brand row arrives **as a summary** (`templatedLayoutIds=[]`), the new deck row
-has `slideCount: 0`, and **0 new ERROR or hydration lines** in the dev log.
+has `slideCount: 0`, and ~~**0 new ERROR or hydration lines** in the dev log~~ — *that last clause is
+vacuous; a curl probe never executes client JS, so no `"source":"Browser"` line can appear either way. See
+"Correcting a claim in the previous section" below.*
 
 Also driven live, which unit tests explicitly cannot cover (`route-harness.ts` says so: it imports
 handlers directly and so never exercises Next's own routing) — `out/probe-reorder.mjs`, **13/13**:
@@ -2607,3 +2609,348 @@ needles are live (so the client-side pass is meaningful, not a pattern that matc
   toggle and both themes were exercised by hand; a screenshot diff would be the honest mechanization.
 - Likewise the drag gesture itself: the reorder *route* is covered three ways and the grid's logic is plain
   code, but no test performs a pointer drag.
+
+---
+
+## Workspace: five server capabilities that had no caller — and a stale `.next` that faked 404s (2026-08-08)
+
+### What was missing, and how it was found rather than guessed
+
+`clientMethods()` (the helper the client-contract suite already used) was cross-referenced against what the
+screens actually call. **Five methods were reachable from no screen at all**: `decks.duplicateSlide`,
+`decks.removeSlide`, `decks.update`, `registry.models`, `brands.import`. Every one had a complete, tested
+server side — so this was unbuilt UI, not unbuilt backend, and nothing server-side needed changing.
+
+That gap is the same shape as the `setSlideLayout` 405 recorded in §2 step 16 (part 2): three client methods
+sent verbs their routes did not export, and it stayed invisible until a screen first called one. **The
+client-contract suite verifies path, verb and envelope — but only for methods something exercises.** An
+unreached method is checked against the route table and then never run.
+
+Four are now wired into the workspace screen (slide duplicate + delete, deck rename, brand swap, and the
+models registry). `brands.import` remains deliberately unreached — no screen creates a brand from pasted
+JSON yet — and is now *declared* as such (below) rather than silently orphaned.
+
+### The control I did not build
+
+A model picker is the obvious fourth control on a generation options panel. **`generateSchema` accepts no
+`modelId`** — which model runs is the server's decision from config — so a picker would have been a control
+that appears to choose and silently does nothing. That is the same defect class as the pre-`@custom-variant`
+dark toggle from the previous section. Proven, not assumed, against the live server:
+
+```
+POST /api/decks/:id/generate  {"modelId":"anything"}  → 400   (strictObject rejects it)
+```
+
+The registry is surfaced **read-only** instead, showing the active model and an amber `unverified` flag when
+`verified: false` — §1.2 measured which ids this account can actually invoke, so that flag is real data.
+
+### Detector bugs in the new reachability test — both caught by its own controls
+
+The test asserts bidirectionally (an orphan must be declared in `UNREACHED`; a declared entry that gained a
+caller must be removed), so the allowlist cannot rot. Getting there took two fixes, and both were found by
+the check failing rather than by inspection:
+
+1. **Type-argument blindness.** `expect(ui).toContain("api.decks.workspace(")` was false, because every real
+   call carries a generic: `api.decks.workspace<WorkspaceView>(deckId)`. Matching `api.name(` literally found
+   **nothing** — the check would have reported every method as an orphan. Fixed with a `callSite()` helper
+   that permits an optional type argument. The glob was ruled out first (`out/probe-glob.mjs`, 13 files)
+   rather than assumed innocent.
+2. **The wrong boundary character.** `registry.models` still reported orphaned: its call is
+   `api.registry.models<{ models: ModelSummary[]; defaultModelId: string }>(…)` and the pattern excluded `;`.
+   Changed `[^;]*?` → `[^()]*?` — a paren is the correct boundary, because that is where the call begins.
+
+The positive control now asserts **both** call forms (with and without a type argument) plus a negative
+control (`decks.notAMethod` must not match), so a future dead detector fails loudly.
+
+**Proof the test catches the defect it describes** (`out/prove-reachability.py`): the `duplicateSlide` call
+site was temporarily un-wired → **1 failed / 17 passed**, then restored (confirmed twice, by `git diff
+--stat` and a `grep -c`). A test that has never failed on its own defect is decoration.
+
+### Eleven hand-copied class strings, three of them subtly wrong
+
+`Select` and `Textarea` were added to `components/ui/primitives.tsx` because the identical field class string
+had been hand-copied to 7 `<select>`s and 4 `<textarea>`s — and **three copies lacked `disabled:opacity-50`**,
+i.e. a control that stayed fully lit while ignoring clicks. `disabled:opacity-50` now lives in the shared
+base rather than per call site. 13 exact-string migrations across 5 files, each asserted to match exactly
+once. The brand editor's compact zone-table picker keeps a documented override.
+
+### Live verification — and the trap that nearly produced a false bug report
+
+`npm run verify:bundle` PASSED (20 client chunks, no `@aws-sdk` / `pptxgenjs` / `sharp` / `AWS_PROFILE`).
+Then the live server, which is where this got interesting.
+
+**First trap: the server I was probing was not mine.** A stale dev server (PID 22916) from the previous
+session still held port 3000; my own `npm run dev` bounced to 3001, printed "Another next dev server is
+already running", and **exited 1**. Every result in my first two probe runs came from a server whose module
+graph was 39 minutes stale, mid-HMR. Its log even contained `ReferenceError: DeckTitle is not defined` — a
+Fast Refresh artifact from editing that file last session (`DeckTitle` is defined, and a full reload cleared
+it), which read exactly like a real bug. Lesson: **confirm the server answering you is the one you started**
+— the port banner is the check, and `npm run dev` bailing is easy to miss when it is backgrounded.
+
+**Second trap, and the one worth remembering: `next build` and `next dev` share `.next`.** After a clean
+restart, **every API route at depth ≥3 under a dynamic segment returned an HTML 404** while depths 1–2
+returned 200:
+
+```
+/api/decks/:id                    200      /api/decks/:id/workspace      404  (text/html)
+/api/brands/:id                   200      /api/decks/:id/outline        404
+/api/registry/models              200      /api/brands/:id/assets        404
+```
+
+The route files were intact, the manifest listed them (31 entries, `workspace` included), and Next reported
+285ms of *application-code* time before answering with **its own** 404 page. `rm -rf .next` + restart →
+**all three recover** (`workspace` 200, `outline` 200, `assets` **405**, correct: it exports POST only).
+So: a stale-artifact collision from having run a production build into the same `.next` a dev server later
+used — **not an application defect**. Had I stopped one step earlier, this would have been filed as a
+routing bug in three innocent routes.
+
+### What the live probes actually establish
+
+`out/probe-workspace.mjs`, **38/38** against a clean server. A node probe cannot run the client bundle, so it
+cannot reproduce a React render crash; what it *can* check is the cause of both crashes from the previous
+section — a `request<T>` type argument asserting a shape the server does not send. So for every field the new
+code reads off a response, the real response is asserted to have it:
+
+- `registry.models` → `{models, defaultModelId}` present, all 5 `ModelSummary` fields present, and
+  `defaultModelId` **resolves to a row in `models[]`** (otherwise the panel renders no active model and no
+  temperature gate). Live: `Claude Opus 5`, `verified=true`, `supportsTemperature=true`.
+- `decks.update {title}` → a bare `DeckMeta` (has `id` + `title`, and **not** a `deck` key).
+- `decks.update {brandId}` → the **different** shape `{deck, brand, tokens, templates}`, confirming the §8
+  divergence is real and that merging the response would have been wrong. Plus §13's guarantee measured
+  directly: **every slide's `slots` byte-identical across the swap** — a re-theme changes no content.
+- `decks.duplicateSlide` → 201, `body.id` a string and **new**, findable in the reloaded workspace (else
+  `setSelectedId` is a silent no-op), inserted at `order + 1`, count +1.
+- `decks.updateSlide {speakerNotes}` → saves, and **the empty string is accepted** (200) — the only way to
+  clear notes.
+- `decks.removeSlide` → gone, count restored.
+- Generation options: `density:"verbose"` → 400 and `temperature:5` → 400, so the select's three values and
+  the slider's range are the real domain rather than a guess. (The slider caps at 1 while the schema allows
+  2: Anthropic's range is 0–1 and the server clamps — deliberate, not a mismatch.)
+
+`out/probe-render.mjs`: all 8 screens 200 — including a **zero-slide deck**, where the panel has no slide to
+bind — no dev error-overlay markers in any returned HTML, and all 18 client chunks the workspace references
+compile and serve 200.
+
+### Correcting a claim in the previous section
+
+The previous section states `out/probe-screens.mjs` found "**0 new ERROR or hydration lines** in the dev
+log". **That evidence is vacuous, and so is the same line in this session's probes.** The dev log carries
+client-side errors as `"source":"Browser"` entries, but those only appear when a real browser connects and
+executes JS. A `curl`/`fetch` probe never does. Verified on a fresh log: after 8 page fetches the log grew
+205 bytes and contained **zero** `"source":"Browser"` lines — only server compile notices. The detector
+itself is alive (the byte-delta moved once the stale-server confusion was cleared), but it is watching for
+something curl cannot produce.
+
+`playwright`, `puppeteer`, `jsdom` and `happy-dom` are all absent from this repo, so there is currently **no
+way to execute the client bundle in a test**. The hydration/render claim rests on hand-exercising the screens
+in a browser — nothing more. Recorded so the "0 hydration errors" line is not read later as automated proof.
+
+### A real Windows write hazard, found by a test that looked like flake
+
+The full-suite run after the above failed **one** test — `writes atomically: a reader never sees a partial
+file` — with `EPERM` on the `rename` inside `writeFileAtomic`. Re-run in isolation it passed **3/3**. That
+combination is the signature of a real race, not flake, so it was probed rather than re-run until green.
+
+`out/probe-eperm.mjs` isolates the cause in three cases:
+
+```
+case 1 (no reader):          rename OK
+case 2 (open read handle):   EPERM     <-- the failure under test
+case 3 (handle now closed):  rename OK  <-- so a bounded retry resolves it
+```
+
+**On Windows, a rename over a destination that any process holds open fails `EPERM`** — unlike POSIX, where
+rename always wins. Node opens no handle with `FILE_SHARE_DELETE`, so a plain concurrent `readFile` of the
+same path is enough to break the swap.
+
+**This is a production hazard, not a test artifact.** The `KeyedMutex` serializes *writers*; readers are
+deliberately unlocked, because a GET must not wait on a PATCH. So every read of a file that a write is
+replacing is a candidate — and this app reads those files on every request. It surfaced under the full suite
+only because that is when enough concurrent IO runs to widen the window.
+
+Fix: `renameWithRetry`, a bounded backoff (`1, 4, 10, 25, 50` ms) around the rename, retrying **only** the
+sharing-violation family (`EPERM`/`EACCES`/`EBUSY`) so that `ENOENT` on a vanished temp file still surfaces
+immediately instead of 90ms later. Atomicity is untouched: each attempt is a single rename that either
+replaces the file wholly or not at all. A reader still never sees a partial file — a writer may just need a
+second try.
+
+### The test for it took three drafts, and the first two proved nothing
+
+Worth recording, because both bad drafts *looked* right:
+
+1. **Draft 1 asserted more than the fix delivers.** It held the read handle open across the entire write, so
+   no retry budget could ever win — the test failed *with* the fix in place. A reader that never lets go is
+   not the case under test, and cannot be.
+2. **Draft 2 was non-discriminating.** Releasing the handle on a 10ms timer armed *before* the write meant the
+   handle was already closed by the time the rename was attempted (the `flush: true` fsync outlasts the
+   timer). It passed — but it also passed against a **bare `rename`**, so it proved nothing. Caught only by
+   running the un-fixed control.
+3. **Draft 3** kicks off the write first, then arms a 40ms release — sitting between the first rename attempt
+   (immediate; the payload is tiny) and the exhausted 90ms budget. Now: **passes with the fix, fails without
+   it** (`out/prove-eperm-test.py` reverts to a bare rename, confirms the failure, restores).
+
+On POSIX the rename simply succeeds and the assertions still hold, so this is a real test on both platforms
+rather than a Windows-only skip.
+
+The pre-existing timing-dependent test is kept alongside it — it is the one that caught this in the first
+place — but the deterministic one is what will keep it caught.
+
+**Suite: 36 files / 1196 tests, `npm run verify` exit 0. Clean `npm run build` (exit 0, full route table) and
+`verify:bundle` PASSED on a freshly removed `.next`.**
+
+### Suite state
+
+`npm run lint` clean; `npm run typecheck` clean; `npm run verify` green at **36 files / 1196 tests**
+(+2 reachability, +1 deterministic EPERM test); `npm run build` clean with the full route table intact; `npm run verify:bundle`
+PASSED.
+
+### Still open
+
+- Unchanged deferrals: desktop PowerPoint open-test (⚠️ VERIFY #5 — deferred, not waived),
+  `AVG_ADVANCE_EM` per-face metrics (⚠️ VERIFY #6), Docker smoke (skipped by user decision).
+- **No test executes client JS.** No pointer drag, no painted pixel, no hydration assertion. A headless
+  browser is the honest mechanization for all three, and would retire the vacuous log check above.
+- ~~`brands.import` is still reachable from no screen — declared in the reachability allowlist, covered by
+  route tests and the smoke script.~~ **Closed by the next section** — the brands gallery now calls it, and
+  the allowlist is empty.
+
+## Brand import: the last orphaned client method — and an asset leak found by probing it (2026-08-08)
+
+The previous section ended with one honest loose end: `brands.import` was declared in the reachability
+allowlist because no screen called it. Closing it was a ten-line handler. Probing whether it actually
+*worked* took the rest of the session and turned up a real defect, three mistakes of my own, and one
+deleted fixture I had to rebuild.
+
+### The allowlist is now empty, and that is the finding
+
+`tests/client-contract.test.ts` asserts the reachability relation in **both** directions: every client
+method either has a caller in `app/**`/`components/**` or is named in `UNREACHED`, **and** every name in
+`UNREACHED` must genuinely have no caller. That second assertion is what makes the list non-rotting — the
+moment the brands gallery called `brands.import`, leaving the declaration in place failed the build. So
+`UNREACHED` is now `{}`, with a comment explaining that emptiness is the result rather than an omission.
+
+There were two import flows to serve and they are not the same operation:
+
+| | brand editor (`/brands/:id`) | brands gallery (`/brands`) |
+|---|---|---|
+| endpoint | `POST /api/brands/:id/import` | `POST /api/brands/import` |
+| semantics | **replaces** every field of *this* brand | **creates** a new brand |
+| payload | bare `BrandDefinition` | bare `BrandDefinition`; `id`/`userId`/`createdAt` discarded server-side |
+| useful when | you have a brand to overwrite | you have a config and no brand — the case the editor cannot serve |
+
+The gallery needed the second because the editor's version is useless before any brand exists: you cannot
+overwrite what is not there. It `reload()`s rather than splicing the response into the list, because the
+endpoint answers a `BrandDefinition` while the list holds `BrandSummary` — whose `templatedLayoutIds` is
+server-derived and not present in the response.
+
+### One component, not two copies
+
+Both flows want the same UI: paste-or-pick-a-file, a Clear button, one submit path, `JSON.parse` locally and
+every other judgement left to the server. The editor already had that UI inline. Copying it would have
+duplicated **eleven hand-written class strings**, and when I compared them against the shared card/field
+styles used elsewhere, **three were subtly wrong** — a spacing scale that existed nowhere else, a border
+token off by one step, a disabled state that did not dim. Two copies means two drift paths, and drift in
+hand-copied Tailwind is invisible until someone screenshots the two screens side by side.
+
+So `components/brand/json-import.tsx` is now shared (`{label, hint, submitLabel, pendingLabel, busy,
+onSubmit}`) and the editor's `JsonSection` lost its `text`/`parseError` state and its `submit` — it keeps
+only what is genuinely its own (`exported`, `download`). The hidden file input is cleared after each pick so
+re-selecting the *same* file still fires `change`; that is a real browser behaviour, not defensiveness.
+
+### Live probe: 22/22, after the probe itself was wrong twice
+
+`out/probe-import.mjs` against a clean server (`rm -rf .next`, one dev process, port banner confirmed —
+the lesson from the previous section):
+
+- Round-trip: `GET /api/brands/:id` → `POST /api/brands/import` → the new brand's colors, fonts, tone, and
+  **`templates` with zones** match the source field for field.
+- A crafted `id` and `userId` in the payload are **discarded**, not honoured: the created brand has a fresh
+  ULID and belongs to the caller. The victim record is byte-identical afterwards.
+- An invalid config yields `400` with **field-level** `issues` (`"colors.primary: must be a hex colour such
+  as #1A3A6B"`), and **nothing is partially applied** — no brand is created at all (§12).
+
+The first run reported **10 FAILED, and every one was my probe's fault.** It posted the entire
+`{brand, tokens, layouts, fonts, tones, templates}` envelope from `GET /api/brands/:id` to an endpoint that
+takes the bare definition; the server correctly 400'd naming `brand` and `tokens` as unrecognized keys. That
+is `strictObject` doing its job, and I nearly wrote it up as a bug. Fixed to `source.body.brand`. Then a
+second false failure: I asserted `issues` were `{path, message}` objects when they are **pre-formatted
+`"path: message"` strings**. Both are the same underlying error as the crashes recorded two sections ago —
+`request<T>` casts an `unknown` body to whatever generic you name, so a wrong shape assertion type-checks
+and only fails at runtime. Knowing the hazard did not stop me repeating it.
+
+### The real defect: brand deletion leaks assets two ways
+
+`out/probe-import-assets.mjs` asked what a round-tripped `backgroundAssetId` means when the config crosses a
+boundary. Two answers, one of them a bug:
+
+- **An unknown asset id is rejected** (`400`), not stored as a dangling reference. The rejected id is echoed
+  back, which is fine — it is the client's own value, not another user's secret.
+- **A shared asset survives** deleting one of the brands referencing it, so an imported copy still renders.
+
+But that second probe exposed something worse. `knownAssetIds` enumerates **references** — other brands'
+`templates[].backgroundAssetId` plus `logo` — and *not* stored assets, because `AssetStore` has no
+`list(userId)`. While `addAsset`/`removeAsset` keep the two sets equal, **brand deletion breaks the
+equivalence**:
+
+> Deleting a brand leaves its asset bytes in the store with nothing referencing them. They are storage the
+> user can neither see nor reclaim — *and* because "known" means *referenced*, they stop validating. A config
+> exported from that brand before the delete no longer imports ("refers to an image that no longer exists"),
+> while `GET /api/assets/:id` still serves the PNG happily.
+
+An asset that serves but does not validate is the kind of inconsistency that reaches a user as "my export
+won't import" with nothing in the logs. Per §14 I did **not** redesign the port: both honest fixes (cascade
+the deletion, or add `list` to `AssetStore`) are larger than the change that surfaced this. Instead it is
+documented at both sites — `brand-service.ts`'s `delete`, and a rewritten `knownAssetIds` docstring that
+previously **claimed** the set included "this user's stored assets", which the code does not do — and pinned
+by a test:
+
+```
+it("leaves assets behind, so a config exported beforehand no longer imports (known limitation)")
+```
+
+It asserts the asset's `getMeta` survives the delete, that re-importing the pre-delete export throws
+`InvalidBrandConfig` with an issue matching `/no longer exists/i`, and that a config whose asset is *still*
+referenced imports fine — so the test fails for the right reason, not merely because import is picky.
+Asserting the limitation rather than only commenting it means whichever fix lands has to update this test
+deliberately. **A limitation nothing asserts is one the next person rediscovers from a user report.**
+
+Writing that test cost one more small lesson: `issues` is on `AppError.detail`, not on the error itself. The
+HTTP body's `issues` key is produced by the route serializer (`errors.ts:305`), so a service-layer test has
+to read `(err.detail as { issues: string[] }).issues` — the house pattern already used elsewhere in that
+file. `detail` is documented "for logs only — never serialized to a client", and the serializer is the one
+place allowed to promote part of it.
+
+### I deleted a real fixture, and restoring it taught me two schemas
+
+My asset probe called `DELETE /api/brands/:id` on the source brand. It returned **204** — correctly, since no
+deck referenced it — and it happened to be the only *templated* brand in the data dir. The guard was not
+wrong; my probe should not have deleted a record it did not create. Restoring it failed twice before working:
+
+1. I guessed the tone shape as `{preset: ...}`. Real shape: `{voice, traits, bannedWords}`. The schema
+   answered with three field-level issues naming `voice`, `traits`, and the unrecognized key — the §12
+   behaviour the import panel promises, demonstrated against my own mistake.
+2. Import then failed anyway, because `knownAssetIds` no longer contained the now-unreferenced asset —
+   the very leak above, biting the person who found it.
+
+`out/restore-fixture2.mjs` rebuilt it through the path that actually works: recover the bytes from the
+still-serving orphan, create a brand, then `POST /api/brands/:id/assets`, which creates the asset and the
+template reference in one write. Result: a templated brand with 3 seeded zones (§4's registry-seeding rule),
+5 brands total. The orphaned asset from the deleted brand is *still* there and still serving, which is the
+leak sitting in the data dir as evidence.
+
+### Suite state
+
+`npm run lint` clean; `npm run typecheck` clean; `npm run verify` green at **36 files / 1197 tests** (+1 for
+the asset-leak limitation); `npm run build` clean on a fresh `.next` with the full route table;
+`npm run verify:bundle` PASSED (20 client chunks, no `@aws-sdk`/`pptxgenjs`/`sharp`/`AWS_PROFILE`).
+
+### Still open
+
+- **The asset-reference leak above is a known, asserted defect, not a resolved one.** Fix requires either
+  cascading asset deletion from brand deletion, or adding `list(userId)` to the `AssetStore` port so "known"
+  can mean *stored*. The second also makes orphaned bytes discoverable and reclaimable.
+- Unchanged deferrals: desktop PowerPoint open-test (⚠️ VERIFY #5 — deferred, not waived), `AVG_ADVANCE_EM`
+  per-face metrics (⚠️ VERIFY #6), Docker smoke (skipped by user decision).
+- **Still no test executes client JS** — including the new shared import component. Its file-input reset,
+  the `JSON.parse` error path, and the busy-state disabling are all unexercised by the suite; only the
+  server side of both import flows is covered. A headless browser remains the honest mechanization.

@@ -403,10 +403,10 @@ describe("API client reachability", () => {
    * way — never a way to silence the check.
    */
   const UNREACHED: Record<string, string> = {
-    // `POST /api/brands/import` CREATES from an exported config. The brands gallery creates from defaults
-    // and the editor's JSON panel REPLACES an existing brand (`importInto`, which IS called), so nothing
-    // needs the create-from-JSON path yet. Covered by `routes-brands.test.ts` and `scripts/smoke.ts`.
-    "brands.import": "no screen creates a brand from pasted JSON yet; covered by route tests + smoke",
+    // Empty, and that is the finding: every client method now has a caller. `brands.import` was the last
+    // entry — the brands gallery's create-from-JSON panel now calls it, so leaving the declaration here
+    // would fail the second assertion below. That is the check working as designed: the allowlist cannot
+    // rot into a list of stale excuses, because a declared method that gains a caller breaks the build.
   };
 
   /**

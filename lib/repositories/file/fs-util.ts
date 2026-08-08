@@ -66,6 +66,42 @@ export function safeJoin(root: string, ...segments: string[]): string {
 let tempCounter = 0;
 
 /**
+ * Windows-only: a rename over a destination that any process currently holds open fails `EPERM`
+ * (POSIX rename just wins). Node opens no handle with `FILE_SHARE_DELETE`, so a concurrent
+ * `readFile` of the SAME file is enough to break the swap.
+ *
+ * That is not a test artifact — it is this app's normal shape. The `KeyedMutex` serializes
+ * *writers*, and readers are deliberately unlocked (a GET must not wait on a PATCH), so every
+ * read of a file being rewritten is a candidate. It surfaced only under the full suite, where
+ * enough IO runs concurrently to make the window wide; three isolated runs of the same test
+ * passed, which is exactly how a real race pretends to be flake.
+ *
+ * The reader's handle is short-lived, so a bounded retry is sufficient and correct — verified by
+ * probe (`out/probe-eperm.mjs`): rename fails EPERM while a read handle is open and succeeds once
+ * it closes. Atomicity is untouched: each attempt is still a single rename that either replaces
+ * the file wholly or not at all. A reader never sees a partial file; a writer may just need a
+ * second try.
+ */
+const RENAME_RETRY_DELAYS_MS = [1, 4, 10, 25, 50];
+
+async function renameWithRetry(temp: string, filePath: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(temp, filePath);
+      return;
+    } catch (err) {
+      // Only the sharing-violation family is retried. ENOENT (a vanished temp file) or EACCES on a
+      // read-only directory are real failures and must surface immediately rather than after 90ms.
+      const code = (err as NodeJS.ErrnoException).code;
+      const retryable = code === "EPERM" || code === "EACCES" || code === "EBUSY";
+      const delay = RENAME_RETRY_DELAYS_MS[attempt];
+      if (!retryable || delay === undefined) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+/**
  * Atomic write: temp file in the target directory → rename over the destination.
  *
  * The temp file MUST share the destination's directory — a rename across filesystems is a
@@ -80,7 +116,7 @@ export async function writeFileAtomic(filePath: string, data: Uint8Array | strin
   try {
     // `flush: true` fsyncs before close, so the rename cannot expose an empty file after a crash.
     await writeFile(temp, data, { flush: true });
-    await rename(temp, filePath);
+    await renameWithRetry(temp, filePath);
   } catch (err) {
     await rm(temp, { force: true }).catch(() => {});
     throw err;

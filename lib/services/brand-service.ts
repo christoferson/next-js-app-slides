@@ -284,6 +284,12 @@ export class BrandService {
     const referencing = decks.filter((d) => d.brandId === brandId);
     if (referencing.length > 0) throw BrandInUse(brandId, referencing.length);
 
+    // NOTE: the brand's assets are deliberately NOT deleted here, and that leaks two ways. The bytes stay
+    // in the store with nothing referencing them (storage the user cannot see or reclaim), and because
+    // `knownAssetIds` enumerates *references* rather than stored assets, they also stop validating — a
+    // config exported from this brand no longer imports even though its background still serves. Both are
+    // recorded in VERIFICATION.md; the honest fixes (cascade the deletion, or add `list` to the asset
+    // port) are bigger than this comment and were not in scope when it was found.
     await this.deps.brands.delete(userId, brandId);
   }
 
@@ -486,9 +492,26 @@ export class BrandService {
   /**
    * The asset ids `validateBrand` cross-checks against.
    *
-   * Built from the *other* brands' references plus this user's stored assets. An empty set would be
-   * wrong in a specific way: it makes every background reference look dangling, so an update that
-   * touches nothing but the brand name would fail validation.
+   * Built from this user's brands' asset references. An empty set would be wrong in a specific way: it
+   * makes every background reference look dangling, so an update that touches nothing but the brand name
+   * would fail validation.
+   *
+   * ## "Known" means *referenced*, not *stored* — and that is a real limitation
+   *
+   * There is no `AssetStore.list(userId)`, so the only enumerable source of asset ids is the brands that
+   * reference them. For every flow that exists today the two sets are the same: `addAsset` stores the
+   * bytes and writes the reference in one call, and `removeAsset` drops the reference and the bytes
+   * together. So an asset is reachable exactly while some brand points at it.
+   *
+   * Deleting a brand breaks that equivalence: `delete` removes the brand but not its assets, so the bytes
+   * survive and keep serving while becoming invisible here. A config exported from that brand then fails
+   * to import with "refers to an image that no longer exists" — technically wrong (the image serves fine)
+   * and unfixable from the UI, because nothing can re-reference an id this set does not contain.
+   *
+   * Observed live, not theorized: a probe deleted an unreferenced brand and its exported config stopped
+   * importing while `GET /api/assets/:id` still returned the PNG. Recorded in VERIFICATION.md; the fix is
+   * a `list(userId)` on the port (or cascading asset deletion), both of which are larger than the change
+   * that surfaced it.
    */
   private async knownAssetIds(userId: string): Promise<ReadonlySet<string>> {
     const ids = new Set<string>();

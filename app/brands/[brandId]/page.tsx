@@ -55,6 +55,7 @@ import { resolveZones } from "@/lib/layouts/render-mode";
 import { sampleSlots } from "@/lib/layouts/sample-content";
 import { ApiError, api } from "@/lib/client/api";
 import { useResource } from "@/components/use-resource";
+import { JsonImportField } from "@/components/brand/json-import";
 import {
   Button, Card, Empty, ErrorNote, Field, Flag, Input, Select, Textarea, cn,
 } from "@/components/ui/primitives";
@@ -894,18 +895,16 @@ function SelectCell<T extends string>(
  * Export shows the SAVED brand, not the draft — the round-trip guarantee is about what the server stored,
  * and a file exported from unsaved edits would re-import as something the user never saved.
  *
- * Import is a textarea rather than only a file input, because pasting is how a config shared in a chat
- * message actually arrives. It is parsed locally only far enough to be an object; everything else is the
- * server's judgement, and its zod issues render field-by-field through `ErrorNote`.
+ * The import control itself is `JsonImportField`, shared with the gallery's create-from-JSON flow. The two
+ * differ only in their target (replace this brand vs create a new one); when the gallery's flow was built,
+ * keeping a second copy of the parse/clear/error behaviour here would have been the same mistake as the
+ * eleven hand-copied field class strings — three of which had silently drifted.
  */
 function JsonSection(
   { brand, busy, onImport }: {
     brand: BrandDefinition; busy: string | undefined; onImport: (parsed: unknown) => void;
   },
 ) {
-  const [text, setText] = useState("");
-  const [parseError, setParseError] = useState<string | undefined>();
-
   const exported = useMemo(() => JSON.stringify(brand, null, 2), [brand]);
 
   const download = (): void => {
@@ -917,21 +916,6 @@ function JsonSection(
     anchor.download = `brand-${brand.name.replace(/[^a-zA-Z0-9-_]+/g, "-").toLowerCase()}.json`;
     anchor.click();
     URL.revokeObjectURL(url);
-  };
-
-  const submit = (): void => {
-    setParseError(undefined);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      // A local parse failure is not an `ApiError`, so it gets its own line rather than being sent to the
-      // server to produce a less specific one.
-      setParseError("That isn't valid JSON. Paste the whole exported file, including its braces.");
-      return;
-    }
-    onImport(parsed);
-    setText("");
   };
 
   return (
@@ -958,25 +942,14 @@ function JsonSection(
         </pre>
       </details>
 
-      <Field label="Import" hint="Replaces every field of this brand. Nothing is applied if it is invalid.">
-        <Textarea
-          rows={4}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          spellCheck={false}
-          className="font-mono text-xs"
-          placeholder='{"name":"Acme","colors":{…},"fonts":{…},"tone":{…},"templates":{…}}'
-        />
-      </Field>
-
-      {parseError !== undefined && <ErrorNote message={parseError} />}
-
-      <Button
-        onClick={submit}
-        disabled={busy !== undefined || text.trim() === ""}
-      >
-        {busy === "import" ? "Importing…" : "Replace this brand"}
-      </Button>
+      <JsonImportField
+        label="Import"
+        hint="Replaces every field of this brand. Nothing is applied if it is invalid."
+        submitLabel="Replace this brand"
+        pendingLabel="Importing…"
+        busy={busy !== undefined}
+        onSubmit={onImport}
+      />
     </Card>
   );
 }
