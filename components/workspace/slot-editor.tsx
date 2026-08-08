@@ -23,7 +23,7 @@ import { Plus, X } from "lucide-react";
 import type { SlotValue, SlotValues } from "@/lib/domain/slots";
 import { isListSlot } from "@/lib/domain/slots";
 import type { SlotSpec } from "@/lib/layouts/types";
-import { Button, cn } from "@/components/ui/primitives";
+import { Button, Textarea, cn } from "@/components/ui/primitives";
 
 export interface SlotEditorProps {
   slots: readonly SlotSpec[];
@@ -89,7 +89,7 @@ function SlotField(
           />
         )
         : (
-          <textarea
+          <Textarea
             id={id}
             // Two rows for short slots, four for prose. Derived from the budget rather than hardcoded per
             // slot so a new layout's fields are sized sensibly with no edit here.
@@ -97,7 +97,6 @@ function SlotField(
             value={typeof value === "string" ? value : ""}
             onChange={(event) => onChange(event.target.value)}
             disabled={disabled}
-            className="w-full resize-y rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink disabled:opacity-50"
             placeholder={spec.description}
           />
         )}
@@ -137,13 +136,12 @@ function ListInput(
         // Index keys: list items are positional content with no identity of their own, and an
         // item-text key would remount the input the user is typing in on every keystroke.
         <div key={index} className="flex items-start gap-1.5">
-          <textarea
+          <Textarea
             {...(index === 0 ? { id } : {})}
             rows={1}
             value={item}
             onChange={(event) => replace(index, event.target.value)}
             disabled={disabled}
-            className="w-full resize-y rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink disabled:opacity-50"
           />
           <span className="w-14 shrink-0 pt-2 text-right text-[11px] text-ink-soft/70">
             <Counter used={item.length} budget={itemBudget} />

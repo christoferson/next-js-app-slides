@@ -15,7 +15,7 @@ import type { BrandSummary } from "@/lib/brand/types";
 import type { DeckSummary } from "@/lib/domain/deck";
 import { ApiError, api } from "@/lib/client/api";
 import { useResource } from "@/components/use-resource";
-import { Button, Card, Empty, ErrorNote, Field, Input } from "@/components/ui/primitives";
+import { Button, Card, Empty, ErrorNote, Field, Input, Select } from "@/components/ui/primitives";
 
 export default function DecksPage() {
   // Two independent reads, fetched together: the screen needs a brand list before it can create anything,
@@ -119,15 +119,14 @@ export default function DecksPage() {
               </div>
               <div className="min-w-48">
                 <Field label="Brand">
-                  <select
+                  <Select
                     value={effectiveBrandId}
                     onChange={(event) => setBrandId(event.target.value)}
-                    className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm"
                   >
                     {data.brands.map((brand) => (
                       <option key={brand.id} value={brand.id}>{brand.name}</option>
                     ))}
-                  </select>
+                  </Select>
                 </Field>
               </div>
               <Button variant="primary" onClick={() => void create()} disabled={busy || effectiveBrandId === ""}>

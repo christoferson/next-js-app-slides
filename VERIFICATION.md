@@ -2389,7 +2389,221 @@ deck in both modes.
 
 ### Still open (unchanged by this section)
 
-- **Screens**: `@dnd-kit` slide reorder, `next-themes` provider.
+- ~~**Screens**: `@dnd-kit` slide reorder, `next-themes` provider.~~ — **done**, see the next section.
 - Deferred/flagged: desktop PowerPoint open-test (⚠️ VERIFY #5 — deferred, not waived; note that the
   `marker:"none"` fix above is confirmed by LibreOffice and by OOXML inspection, not by desktop Office),
   `AVG_ADVANCE_EM` per-face metrics (⚠️ VERIFY #6), Docker smoke (skipped by user decision).
+
+---
+
+## Screens: dark mode + drag reorder — **DONE**, and the live server found two crashes no test could (2026-08-08)
+
+The last two items on the SPEC section-10/12 frontend list: the `next-themes` provider and the `@dnd-kit`
+slide reorder. Both shipped. What is worth recording is not the features — it is that **two probe-verified
+Tailwind facts changed the design before any code was written**, and that **opening the app against a live
+server found two runtime crashes that 1183 green tests did not**.
+
+### Two Tailwind v4 facts, probe-verified rather than assumed
+
+Both were load-bearing, and one of them would have shipped an inert toggle.
+
+| Question | Assumption | VERIFIED answer (`out/probe-dark-variant/`) |
+|---|---|---|
+| Does `dark:` respond to a **class**? | "Yes, like v3 with `darkMode:'class'`" | **NO.** v4's `dark:` compiles to `@media (prefers-color-scheme: dark)` and emits **no `.dark` selector at all**. `next-themes` toggles a class, so the provider alone would have been a control that visibly does nothing. `@custom-variant dark (&:where(.dark, .dark *))` is what connects them. |
+| Does a plain `.dark { --color-* }` override reach the utilities, or is `@theme inline` needed? | unclear | **A plain block works.** `.bg-surface` compiles to `background-color: var(--color-surface)`, so re-declaring the variable under `.dark` is enough. No `@theme inline` indirection. |
+
+The first probe on the second question **produced a confidently wrong answer**: it string-matched
+`background-color: transparent` out of a preflight line and "concluded" the override would be inert. The
+fix was to print the actual `.bg-ink` rule (`probe3.mjs`) rather than to grep for one. Worth recording as a
+method note: a probe that greps a compiled bundle can confirm a wrong hypothesis just as easily as a right
+one — print the rule, don't match on it.
+
+Confirmed again in the SHIPPED css after `next build` (`out/check-built-css.mjs`), which is the only place
+the compiler's real behaviour is visible: `.dark` selector present, all ten overrides present,
+`.bg-surface{background-color:var(--color-surface)}`, `color-scheme:dark` shipped, and **no
+`prefers-color-scheme` fallback** for our variant.
+
+### 22 `bg-white` literals → one `surface` token
+
+`bg-white` is white in both themes, so each of the 22 occurrences would have needed its own `dark:` variant
+— and the next screen would need them too. Tokenizing to `bg-surface` (plus `flag`/`danger` groups) moves
+the theme flip to ONE place. This is the layout-registry argument applied to colour: one declaration, many
+consumers, no parallel table. 31 replacements across 9 files (`out/tokenize-colors.py`).
+
+The one non-mechanical replacement, in `primitives.tsx`:
+
+```ts
+primary: "bg-ink text-canvas hover:bg-ink-soft",   // NOT text-white
+```
+
+`bg-ink` becomes near-white in dark mode, so a fixed `text-white` label would have been white-on-white.
+Pairing the two tokens keeps the contrast inverted *with* the theme rather than surviving by luck in one.
+
+### The palette meets the bar the app enforces on brands
+
+`compileTheme` repairs any brand pairing below AA. Studio chrome that failed the same check would be the
+tool not eating its own cooking, so the dark palette is checked against the project's **own**
+`contrastRatio` — not a second WCAG implementation that could drift from the one deciding brands' fate.
+`tests/dark-theme.test.ts` asserts all 11 painted pairs in **both** palettes.
+
+The §12 amber badge is the pair that matters most — a flag may never be suppressed, and an illegible badge
+is suppression by another name: **light 4.51:1 → dark 7.88:1**.
+
+**An error worth recording: I invented an acceptance bar the shipped code already failed.** The first draft
+asserted a 1.5:1 non-text floor for borders — and the *existing light* palette failed it at 1.28:1. A
+barely-there hairline is a deliberate design choice, and WCAG's 3:1 non-text minimum applies to controls
+that convey state, not to decorative separators. Corrected to a **comparative** check (dark ≥ 90% of
+light's separation), which tests the thing that actually matters: dark mode must not lose the separation
+light mode has. A test that fails the code it was written to describe is usually the test's fault.
+
+Two more found by writing the test, both mine, both in the test:
+
+1. **`blockBody(css, ".dark")` matched the wrong block.** A substring search for `.dark` hits it first
+   inside `@custom-variant dark (&:where(.dark, .dark *))`, then takes the *next* `{` — which is `@theme`'s.
+   So `DARK` silently parsed as a second copy of `LIGHT`, and **all 18 AA assertions passed against the
+   wrong colours**. Caught only by the anchor test (`expect(DARK.ink).toBe("#ececf1")`). Fixed with an
+   anchored regex (`/^\.dark\s*\{/m`). This is the argument for anchor tests in one paragraph: without one,
+   the suite was 18 green assertions about nothing.
+2. **A pair table entry described a state that does not exist.** I listed `ink-soft` on `ink` for the
+   primary button's hover. Hover swaps the *fill* to `ink-soft` and leaves the label `text-canvas`, so the
+   real pair is `canvas` on `ink-soft`. Hover states are where a "passing" button most often stops passing,
+   since only one side of the pair moved.
+
+### §8: a slide preview must look identical in both themes
+
+The hazard dark mode introduces. A preview is a **scale model of the .pptx**; its colours come from
+`DesignTokens`, never from the studio palette. A preview that dimmed itself in dark mode would show the
+user something the export does not contain — the exact preview/export divergence §8 exists to prevent, and
+it would look *better*, not broken, to whoever added it.
+
+It holds structurally: **`lib/layouts/**` contains no `className` at all** — every slide surface styles
+exclusively from inline `style` off tokens. Now asserted rather than assumed, with the detector's positive
+control included so "no offenders" cannot mean "the pattern matches nothing":
+
+- no `className` anywhere in the layout render path (stricter and more durable than enumerating colour
+  utilities — `className` is the entry point for *every* Tailwind utility);
+- no `dark:` variant either;
+- no `var(--color-…)` in `preview.tsx`, which would tie a slide to the chrome palette.
+
+`components/preview/slide-preview.tsx` is deliberately **excluded**: its one Tailwind-coloured element is
+the unknown-layout placeholder, which returns *before* `SlideFrame` — studio chrome standing in for a
+slide, not a slide, so it should follow the theme.
+
+### The reorder grid: a grip, not a distance sensor
+
+The card is already a `<button>` (select this slide), and dnd-kit's pointer listeners `preventDefault` the
+events a button needs to fire a click — so `{...listeners}` on the card would make the grid draggable and
+**unselectable**. `activationConstraint: {distance: 6}` does let both coexist, but it makes every click a
+6-pixel gamble and competes with touch scrolling. A dedicated grip says which pixels drag, and doubles as
+the keyboard handle (Space to lift, arrows to move, Escape to cancel), so there is one affordance to learn.
+
+Three details that are requirements rather than polish:
+
+- **`touch-none` on the grip.** Without it a touch drag scrolls the page instead of lifting the card,
+  because the browser claims the gesture first.
+- **`rectSortingStrategy`, not `verticalListSortingStrategy`** — this is a two-column wrapping grid, and the
+  vertical strategy assumes one column, so cards would shift along the wrong axis.
+- **Optimistic order is `null` when idle**, not a mirrored copy of `items`. A mirror needs an effect to
+  follow the server, and that effect is exactly where a stale render survives a reload. Idle renders read
+  the server list directly, so its answer always wins the moment a drag ends.
+
+The handler deliberately does **not** use the screen's `run` helper: that sets a global `busy` key, which
+would disable the grid for the length of the request and make a second consecutive drag impossible — the
+interaction people actually perform when tidying a deck. It also `set`s rather than `reload`s, because a
+reorder cannot change tokens, zones, or slots — only `order`.
+
+Also fixed: the grip carried `group-hover:opacity-100` with **no `group` ancestor** — a dead class. The
+`[li:hover_&]` variant is what actually reveals it, paired with `focus-visible:opacity-100` so a Tab-only
+user can see the handle they just focused.
+
+`@dnd-kit/utilities` was arriving **transitively** through `@dnd-kit/core` while `slide-grid.tsx` imports
+`CSS` from it at the top level — so it resolved by luck. Declared explicitly, per the same rule
+`package.json` already states for the server-side three.
+
+### Live-server verification found two crashes that 1183 tests did not
+
+This is the finding of the section. Everything above was green — lint, typecheck, 1183 tests, the build,
+the §12 bundle grep — and the app crashed on two of its five screens.
+
+The dev server mirrors browser console errors into its log. Reading it after loading the pages:
+
+```
+TypeError: data.brands.map is not a function        at DecksPage (app/decks/page.tsx:117)
+TypeError: (brands ?? []) is not iterable           at create   (app/brands/page.tsx:33)
+```
+
+**Bug 1 — the envelope.** Every list route answers with a *named* envelope (`{brands}`, `{decks}`,
+`{layouts}`) so a field can be added later without breaking clients. Two screens asserted
+`api.brands.list<BrandSummary[]>()` — a bare array. `request<T>` casts an `unknown` body to whatever the
+caller names, so **the compiler cannot catch this**, and neither could any existing test: path and verb
+were both correct, which is precisely what `client-contract.test.ts` checked.
+
+**Bug 2 — a create response is not a list item.** `POST /api/brands` answers a `BrandDefinition`; the
+gallery holds `BrandSummary`, which carries the **derived** `templatedLayoutIds` (computed in the
+repository from `Object.keys(brand.templates)`). Both screens prepended the response into the list, so the
+new row evaluated `undefined.length` and threw. Same shape for decks: a summary has a derived `slideCount`,
+a `DeckMeta` does not. Verified against the live server (`out/probe-create-shape.mjs`):
+
+```
+GET  /api/brands  item keys: id,name,colors,fonts,templatedLayoutIds,createdAt,updatedAt
+POST /api/brands       keys: name,colors,fonts,tone,templates,id,userId,createdAt,updatedAt
+  ❌ gallery expression THROWS: Cannot read properties of undefined (reading 'length')
+```
+
+Fixed by `reload()`ing instead of splicing. Converting client-side would be a **second copy of a
+server-side derivation**, which §4 forbids — so the server stays the only place that knows how a summary is
+built. `useResource` already documents this exact rule: *"a mutation that could change anything derived
+should `reload` instead"*. One extra request per creation, in exchange for one shape.
+
+**Both fixes are covered by new generic tests, and both were confirmed to FAIL on the old code before
+being kept** — a test that has never failed on the bug it describes is decoration:
+
+| New check | Reverted the fix → |
+|---|---|
+| every collection route answers a named envelope containing an array (asserted on **live handler responses**, not on route source) | — |
+| the list screens unwrap the key their route sends | **FAILED** as designed |
+| a create response lacks derived summary fields (asserted by **diffing live key sets**, so no hand-written list of which fields are derived) | — |
+| both galleries `reload()` after create rather than splicing | **FAILED** as designed |
+
+The envelope check calls the real handlers rather than grepping route sources: `json({ brands: … })` is
+spread across multi-line `handle(async () => json(` calls, so a static grep would have been brittle in the
+one direction that matters.
+
+Then re-verified live (`out/probe-screens.mjs`): all 7 screens 200, create→list→delete round-trips clean
+for both resources, the new brand row arrives **as a summary** (`templatedLayoutIds=[]`), the new deck row
+has `slideCount: 0`, and **0 new ERROR or hydration lines** in the dev log.
+
+Also driven live, which unit tests explicitly cannot cover (`route-harness.ts` says so: it imports
+handlers directly and so never exercises Next's own routing) — `out/probe-reorder.mjs`, **13/13**:
+`PUT /slides/order` reaches the **static** `order` segment rather than `[slideId]`, returns the full list
+with contiguous `order` 0..n-1, refuses a partial permutation, and the next-themes pre-paint script is
+inlined in the document (without it, a flash of the wrong theme on every load).
+
+**The lesson, stated plainly: 1183 passing tests, a clean typecheck and a green bundle grep did not prove
+the app runs.** The two bugs lived precisely in the gap those instruments do not cover — a cast at the
+client boundary, where the compiler trusts the caller and the route tests never construct a URL. Loading
+the screens was worth more than any of them here, and it is now partly mechanized.
+
+### One cosmetic note
+
+The built css carries two dead rules, `dark:bg-black` and `dark:text-ink` (~120 bytes), because Tailwind v4
+scans **comments and test files** for class-like strings and found them in `globals.css`'s own explanatory
+prose and in `dark-theme.test.ts`'s detector control. Harmless, recorded so it is not mistaken later for a
+`dark:` variant someone forgot to remove.
+
+### Suite state
+
+`npm run verify` green: **36 files / 1193 tests** (was 35/1150 — +1 file, +43 tests: 33 dark-theme, 10
+client-contract). `npm run build` clean; `npm run verify:bundle` PASSED with its self-test confirming the
+needles are live (so the client-side pass is meaningful, not a pattern that matches nothing).
+
+### Still open
+
+- Deferred/flagged, unchanged: desktop PowerPoint open-test (⚠️ VERIFY #5 — deferred, not waived),
+  `AVG_ADVANCE_EM` per-face metrics (⚠️ VERIFY #6), Docker smoke (skipped by user decision).
+- **Not covered by any automated test: the rendered appearance of dark mode.** There is no jsdom in this
+  repo, so `dark-theme.test.ts` proves things about the *declared* palette and the *source*, and
+  `check-built-css.mjs` proves the compiler emitted the rules — but no test looks at a painted pixel. The
+  toggle and both themes were exercised by hand; a screenshot diff would be the honest mechanization.
+- Likewise the drag gesture itself: the reorder *route* is covered three ways and the grid's logic is plain
+  code, but no test performs a pointer drag.

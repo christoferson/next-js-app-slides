@@ -40,7 +40,7 @@ import { ChevronDown, ChevronLeft, ChevronUp, RotateCcw, Trash2, Wand2 } from "l
 import type { Outline, OutlineSlide, VisualHint } from "@/lib/domain/deck";
 import { ApiError, api } from "@/lib/client/api";
 import { useResource } from "@/components/use-resource";
-import { Button, Card, Empty, ErrorNote, Field, Flag, Input } from "@/components/ui/primitives";
+import { Button, Card, Empty, ErrorNote, Field, Flag, Input, Select } from "@/components/ui/primitives";
 
 /**
  * Mirrors `OutlineService.view`'s return. Declared structurally rather than imported: §5 forbids `app/**`
@@ -429,13 +429,12 @@ function LayoutPicker(
     <div className="flex flex-wrap items-end gap-2">
       <div className="min-w-48 flex-1">
         <Field label="Layout">
-          <select
+          <Select
             // The pin's value, NOT the mapped layout: an empty select means "no pin, let the rules
             // decide", and pre-selecting the rule's answer would make clearing a pin unexpressible.
             value={slide.layoutOverride ?? ""}
             onChange={(event) => onLayout(event.target.value === "" ? null : event.target.value)}
             disabled={busy || disabled}
-            className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm disabled:opacity-50"
           >
             <option value="">Automatic — {row.layoutDisplayName}</option>
             {row.options.map((option) => (
@@ -443,7 +442,7 @@ function LayoutPicker(
                 {option.displayName}{option.recommended ? " (recommended)" : ""}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
       </div>
       {row.overridden && (

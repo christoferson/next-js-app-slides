@@ -7,7 +7,10 @@
  * thirty component files to use six of them would make the real ones harder to find.
  */
 
-import type { ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
+import type {
+  ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, ReactNode,
+  SelectHTMLAttributes, TextareaHTMLAttributes,
+} from "react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { AlertTriangle } from "lucide-react";
@@ -61,6 +64,23 @@ const FIELD_BASE =
 
 export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
   return <input className={cn(FIELD_BASE, className)} {...rest} />;
+}
+
+/**
+ * `Select` and `Textarea` exist for the same reason `Input` does: the identical class string had been
+ * hand-copied to seven `<select>`s and four `<textarea>`s, and each copy is a place a token can be missed.
+ * That is how a `bg-white` survives a theme migration — the dark-mode pass had to find and fix all eleven.
+ *
+ * `disabled:opacity-50` is part of the shared base rather than per-call, because a control that stays fully
+ * lit while ignoring clicks is the one accessibility bug every one of these copies could have had
+ * independently.
+ */
+export function Select({ className, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
+  return <select className={cn(FIELD_BASE, className)} {...rest} />;
+}
+
+export function Textarea({ className, ...rest }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return <textarea className={cn(FIELD_BASE, "resize-y", className)} {...rest} />;
 }
 
 export function Field(

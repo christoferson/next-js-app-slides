@@ -373,3 +373,99 @@ describe("API client ↔ route response shape", () => {
     }
   });
 });
+
+/* ─────────────────────────── is anything CALLING these methods? ─────────────────────────── */
+
+/**
+ * The fourth fact, and the one that hid every bug this file was written for: **whether a client method has
+ * a caller at all.**
+ *
+ * `setSlideLayout` sent `PATCH` to a `PUT`-only route and was found by writing the first screen to use it.
+ * `brands.update` and `decks.reorderSlides` had the same defect and were still latent — because no screen
+ * called them either. The checks above now catch a wrong verb, path, or envelope, but only for a method
+ * something exercises: an unreached method is verified against the route table and then never run, which is
+ * precisely how three 405s survived a green suite.
+ *
+ * So this asserts reachability. A method with no caller is not necessarily a bug — but it IS unverified in
+ * the only way that counts, so it must be declared as such rather than discovered later. Five were found in
+ * exactly this state after the checks above shipped (`duplicateSlide`, `removeSlide`, `decks.update`,
+ * `registry.models`, `brands.import`), all with complete and tested server sides and no UI.
+ *
+ * Deliberately a grep over `app/**` + `components/**` rather than a render test: there is no jsdom in this
+ * repo, and "does a screen mention this method" is a static question that a static check answers honestly.
+ * It cannot prove the call is on a reachable code path — only that the method is not orphaned.
+ */
+describe("API client reachability", () => {
+  /**
+   * Methods intentionally not called from any screen, each with the reason.
+   *
+   * Keeping this list short is the point. An entry here is a claim that the method is verified some OTHER
+   * way — never a way to silence the check.
+   */
+  const UNREACHED: Record<string, string> = {
+    // `POST /api/brands/import` CREATES from an exported config. The brands gallery creates from defaults
+    // and the editor's JSON panel REPLACES an existing brand (`importInto`, which IS called), so nothing
+    // needs the create-from-JSON path yet. Covered by `routes-brands.test.ts` and `scripts/smoke.ts`.
+    "brands.import": "no screen creates a brand from pasted JSON yet; covered by route tests + smoke",
+  };
+
+  /**
+   * Every screen and component file. `for await` rather than `Array.fromAsync`, matching `routeTable`
+   * above — the latter is not in this project's `lib` target.
+   */
+  async function uiFiles(): Promise<string[]> {
+    const rels: string[] = [];
+    for await (const entry of glob("{app,components}/**/*.tsx", { cwd: ROOT })) {
+      rels.push((entry as string).split(path.sep).join("/"));
+    }
+    return rels;
+  }
+
+  /** All screen + component source, concatenated. */
+  async function uiSource(): Promise<string> {
+    const sources = await Promise.all(
+      (await uiFiles()).map((rel) => readFile(path.join(ROOT, rel), "utf8")),
+    );
+    return sources.join("\n");
+  }
+
+  /**
+   * A call site for `decks.workspace` looks like `api.decks.workspace<WorkspaceView>(deckId)` — the type
+   * argument sits between the name and the paren. Matching `api.name(` literally therefore finds NOTHING,
+   * which is what the positive control below caught on the first run: every method looked orphaned. The
+   * generic is optional (`api.decks.remove(id)` has none), so it is matched as optional too.
+   *
+   * The type argument is matched as "anything but a paren", not "anything but a semicolon": an inline object
+   * type carries semicolons (`api.registry.models<{ models: ModelSummary[]; defaultModelId: string }>(…)`),
+   * and excluding them made that one call invisible — a false orphan report, caught by this check's own
+   * failure rather than by inspection. A paren is the correct boundary because it is where the call begins.
+   */
+  const callSite = (name: string): RegExp =>
+    new RegExp(`\\bapi\\.${name.replace(".", "\\.")}\\s*(?:<[^()]*?>)?\\s*\\(`);
+
+  it("has a screen calling every client method", async () => {
+    const ui = await uiSource();
+    const orphans = clientMethods().filter((name) => !callSite(name).test(ui));
+
+    // Both directions, so the allowlist cannot rot: an unreached method must be declared, AND a declared
+    // one that has since gained a caller must be removed from the list.
+    expect(orphans.filter((name) => !(name in UNREACHED)), "unreached client methods — wire them to a screen or declare why not")
+      .toEqual([]);
+    expect(Object.keys(UNREACHED).filter((name) => !orphans.includes(name)), "declared unreached but now called — drop it from UNREACHED")
+      .toEqual([]);
+  });
+
+  it("finds the screen sources and matches a known call site, so the check above is not vacuous", async () => {
+    expect((await uiFiles()).length).toBeGreaterThan(8);
+
+    const ui = await uiSource();
+    // Two controls, because the first run failed BOTH ways at once. `workspace` is called WITH a type
+    // argument and `decks.remove` WITHOUT one — the detector has to see both forms, and matching a literal
+    // `api.name(` saw neither, reporting every method as an orphan.
+    expect(callSite("decks.workspace").test(ui), "detector misses a call with a type argument").toBe(true);
+    expect(callSite("decks.remove").test(ui), "detector misses a call without a type argument").toBe(true);
+    // And a negative control: a method that does not exist must NOT match, or the regex is matching
+    // anything and "no orphans" would mean nothing.
+    expect(callSite("decks.notAMethod").test(ui)).toBe(false);
+  });
+});

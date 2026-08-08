@@ -55,7 +55,9 @@ import { resolveZones } from "@/lib/layouts/render-mode";
 import { sampleSlots } from "@/lib/layouts/sample-content";
 import { ApiError, api } from "@/lib/client/api";
 import { useResource } from "@/components/use-resource";
-import { Button, Card, Empty, ErrorNote, Field, Flag, Input, cn } from "@/components/ui/primitives";
+import {
+  Button, Card, Empty, ErrorNote, Field, Flag, Input, Select, Textarea, cn,
+} from "@/components/ui/primitives";
 import { SlidePreview } from "@/components/preview/slide-preview";
 
 /**
@@ -397,11 +399,7 @@ function FontPicker(
 
   return (
     <Field label={label} {...(isGated && current.note !== undefined ? { hint: current.note } : {})}>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink"
-      >
+      <Select value={value} onChange={(e) => onChange(e.target.value)}>
         {isGated && (
           <option value={current.id} disabled>
             {current.displayName} — not offered for new brands
@@ -410,7 +408,7 @@ function FontPicker(
         {selectable.map((font) => (
           <option key={font.id} value={font.id}>{font.displayName}</option>
         ))}
-      </select>
+      </Select>
     </Field>
   );
 }
@@ -436,15 +434,11 @@ function ToneEditor(
   return (
     <div className="space-y-3">
       <Field label="Voice" hint={voice?.description}>
-        <select
-          value={tone.voice}
-          onChange={(e) => onChange({ ...tone, voice: e.target.value })}
-          className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink"
-        >
+        <Select value={tone.voice} onChange={(e) => onChange({ ...tone, voice: e.target.value })}>
           {tones.tones.map((t) => (
             <option key={t.id} value={t.id}>{t.displayName}</option>
           ))}
-        </select>
+        </Select>
       </Field>
 
       {voice && (
@@ -619,18 +613,14 @@ function TemplateSection(
     <Card className="space-y-4 p-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <Field label="Layout" hint={layout.description}>
-          <select
-            value={layout.id}
-            onChange={(e) => onSelect(e.target.value)}
-            className="w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink"
-          >
+          <Select value={layout.id} onChange={(e) => onSelect(e.target.value)}>
             {layouts.map((l) => (
               <option key={l.id} value={l.id}>
                 {l.displayName}
                 {draft.templates[l.id]?.backgroundAssetId !== undefined ? " · templated" : ""}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
         <div className="flex items-center gap-2">
           <FilePicker
@@ -884,14 +874,15 @@ function SelectCell<T extends string>(
   },
 ) {
   return (
-    <select
+    <Select
       value={value}
       aria-label={label}
       onChange={(e) => onChange(e.target.value as T)}
-      className="rounded border border-line bg-surface px-1 py-1 text-xs text-ink"
+      // Compact: this sits inside the zone table's dense rows, so it overrides the shared padding.
+      className="w-auto rounded px-1 text-xs"
     >
       {options.map((option) => <option key={option} value={option}>{option}</option>)}
-    </select>
+    </Select>
   );
 }
 
@@ -968,12 +959,12 @@ function JsonSection(
       </details>
 
       <Field label="Import" hint="Replaces every field of this brand. Nothing is applied if it is invalid.">
-        <textarea
+        <Textarea
           rows={4}
           value={text}
           onChange={(e) => setText(e.target.value)}
           spellCheck={false}
-          className="w-full resize-y rounded-md border border-line bg-surface px-2.5 py-1.5 font-mono text-xs text-ink"
+          className="font-mono text-xs"
           placeholder='{"name":"Acme","colors":{…},"fonts":{…},"tone":{…},"templates":{…}}'
         />
       </Field>

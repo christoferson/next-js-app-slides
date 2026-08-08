@@ -24,7 +24,7 @@ import { ChevronLeft } from "lucide-react";
 import type { Briefing, DeckMeta } from "@/lib/domain/deck";
 import { ApiError, api } from "@/lib/client/api";
 import { useResource } from "@/components/use-resource";
-import { Button, Card, Empty, ErrorNote, Field, Input } from "@/components/ui/primitives";
+import { Button, Card, Empty, ErrorNote, Field, Input, Textarea } from "@/components/ui/primitives";
 
 const EMPTY: Briefing = { topic: "", audience: "", objective: "", targetSlideCount: 10 };
 
@@ -163,11 +163,10 @@ function BriefingForm(
         label="Source text (optional)"
         hint="Notes, a transcript, a doc. Evidence on each slide is drawn from this when present."
       >
-        <textarea
+        <Textarea
           rows={8}
           value={draft.sourceText ?? ""}
           onChange={(event) => setField("sourceText", event.target.value)}
-          className="w-full resize-y rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm text-ink"
           placeholder="Paste anything the deck should be grounded in."
         />
       </Field>
